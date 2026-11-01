@@ -1,0 +1,306 @@
+/**
+ * Shared types plus the pure matching logic that turns live monitors and
+ * downtimes into monitor-centric coverage rows.
+ */
+
+export interface LiveMonitor {
+    id: number;
+    name: string;
+    type: string;
+    overallState: string;
+    tags: string[];
+    creatorName: string | null;
+    creatorHandle: string | null;
+    creatorEmail: string | null;
+}
+
+export interface LiveDowntime {
+    id: string;
+    status: string | null;
+    message: string | null;
+    scope: string | null;
+    displayTimezone: string | null;
+    monitorId: number | null;
+    monitorTags: string[];
+    start: string | null;
+    end: string | null;
+    isRecurring: boolean;
+    createdById: string | null;
+    created: string | null;
+    url: string | null;
+}
+
+export interface UserSummary {
+    id: string;
+    name: string | null;
+    handle: string | null;
+    email: string | null;
+}
+
+export interface LiveSnapshot {
+    monitors: LiveMonitor[];
+    downtimes: LiveDowntime[];
+    fetchedAt: string;
+}
+
+/** How a downtime reaches a monitor. */
+export type MatchKind = 'direct' | 'tag' | 'scope';
+
+export interface DowntimeMatch {
+    downtime: LiveDowntime;
+    kind: MatchKind;
+    /** True when every group of the monitor is muted (scope `*` or scope satisfied by monitor tags). */
+    coversAllGroups: boolean;
+    startMs: number | null;
+    endMs: number | null;
+    creatorLabel: string;
+    reason: string;
+}
+
+export type CoverageSource = 'Direct (monitor ID)' | 'Tag/Scope-based' | 'Direct + Tag/Scope';
+/** Whether the whole monitor is silenced or only some of its groups. */
+export type MaintenanceState = 'Whole monitor' | 'Groups only' | 'Not muting';
+
+/** Where the primary downtime's window stands relative to now. */
+export type WindowState = 'Ending soon' | 'Scheduled end' | 'Open-ended' | 'Stale';
+
+export const ENDING_SOON_MS = 24 * 60 * 60 * 1000;
+export const STALE_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
+
+export function windowStateOf(match: Pick<DowntimeMatch, 'startMs' | 'endMs'>, nowMs: number): WindowState {
+    if (match.endMs !== null) {
+        return match.endMs - nowMs <= ENDING_SOON_MS ? 'Ending soon' : 'Scheduled end';
+    }
+    return match.startMs !== null && nowMs - match.startMs > STALE_AFTER_MS ? 'Stale' : 'Open-ended';
+}
+
+export interface CoverageRow {
+    monitor: LiveMonitor;
+    matches: DowntimeMatch[];
+    primary: DowntimeMatch;
+    source: CoverageSource;
+    maintenanceState: MaintenanceState;
+    windowState: WindowState;
+    owner: string;
+    downtimeCreators: string[];
+    latestMessage: string | null;
+}
+
+// Anything before 2000-01-01 is treated as a missing/placeholder value (e.g. epoch 0 → 1970).
+const MIN_VALID_MS = Date.UTC(2000, 0, 1);
+
+export function toValidMs(value: string | number | null | undefined): number | null {
+    if (value === null || value === undefined || value === '') {
+        return null;
+    }
+    let ms: number;
+    if (typeof value === 'number') {
+        ms = value < 1e12 ? value * 1000 : value;
+    } else if (/^\d+$/.test(value)) {
+        const n = Number(value);
+        ms = n < 1e12 ? n * 1000 : n;
+    } else {
+        ms = Date.parse(value);
+    }
+    if (!Number.isFinite(ms) || ms < MIN_VALID_MS) {
+        return null;
+    }
+    return ms;
+}
+
+/**
+ * Validated active check: status is `active`, start is in the past or
+ * missing, and end is in the future or missing.
+ */
+export function isActiveDowntime(downtime: LiveDowntime, nowMs: number): boolean {
+    if (downtime.status !== 'active') {
+        return false;
+    }
+    const startMs = toValidMs(downtime.start);
+    const endMs = toValidMs(downtime.end);
+    if (startMs !== null && startMs > nowMs) {
+        return false;
+    }
+    if (endMs !== null && endMs <= nowMs) {
+        return false;
+    }
+    return true;
+}
+
+function globToRegExp(pattern: string): RegExp {
+    const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
+    return new RegExp(`^${escaped}$`, 'i');
+}
+
+function tagMatches(pattern: string, monitorTags: string[]): boolean {
+    const regex = globToRegExp(pattern.trim());
+    return monitorTags.some((tag) => regex.test(tag.trim()));
+}
+
+function isWildcardOnly(tags: string[]): boolean {
+    return tags.length === 0 || tags.every((tag) => tag.trim() === '*');
+}
+
+/** Positive tag terms in a downtime scope such as `env:prod AND (service:api OR service:web)`. */
+export function positiveScopeTerms(scope: string | null): string[] {
+    if (!scope) {
+        return [];
+    }
+    return scope
+        .replace(/[()]/g, ' ')
+        .split(/\s+(?:AND|OR)\s+|,/i)
+        .map((term) => term.trim())
+        .filter((term) => term && term !== '*' && !/^(NOT\s+|-|!)/i.test(term));
+}
+
+function isAllGroupsScope(scope: string | null): boolean {
+    return !scope || scope.trim() === '*' || positiveScopeTerms(scope).length === 0;
+}
+
+function scopeSatisfiedByMonitorTags(scope: string | null, monitorTags: string[]): boolean {
+    const terms = positiveScopeTerms(scope);
+    return terms.length > 0 && terms.every((term) => tagMatches(term, monitorTags));
+}
+
+export function userLabel(user: UserSummary | undefined, fallbackId: string | null): string {
+    if (user) {
+        if (user.name && user.handle && user.name !== user.handle) {
+            return `${user.name} (${user.handle})`;
+        }
+        return user.name || user.handle || user.email || 'Unknown user';
+    }
+    return fallbackId ? 'Unknown user' : 'Unknown';
+}
+
+export function monitorOwner(monitor: LiveMonitor): string {
+    return monitor.creatorName || monitor.creatorHandle || monitor.creatorEmail || 'Unknown owner';
+}
+
+function matchDowntime(
+    monitor: LiveMonitor,
+    downtime: LiveDowntime,
+): Pick<DowntimeMatch, 'kind' | 'coversAllGroups' | 'reason'> | null {
+    const allGroups = isAllGroupsScope(downtime.scope);
+    const scopeOnTags = scopeSatisfiedByMonitorTags(downtime.scope, monitor.tags);
+
+    // 1. Direct: monitor_identifier.monitor_id
+    if (downtime.monitorId !== null) {
+        if (downtime.monitorId !== monitor.id) {
+            return null;
+        }
+        return {
+            kind: 'direct',
+            coversAllGroups: allGroups || scopeOnTags,
+            reason: `monitor_identifier.monitor_id = ${monitor.id}`,
+        };
+    }
+
+    // 2. Tag-based: every downtime monitor tag must be present on the monitor.
+    if (!isWildcardOnly(downtime.monitorTags)) {
+        const allTagsMatch = downtime.monitorTags.every((tag) => tagMatches(tag, monitor.tags));
+        if (!allTagsMatch) {
+            return null;
+        }
+        return {
+            kind: 'tag',
+            coversAllGroups: allGroups || scopeOnTags,
+            reason: `monitor tags [${downtime.monitorTags.join(', ')}] all present on monitor`,
+        };
+    }
+
+    // 3. Scope-based: wildcard monitor tags, targeting by scope.
+    if (allGroups) {
+        return {
+            kind: 'scope',
+            coversAllGroups: true,
+            reason: 'monitor tags `*` with scope `*` (org-wide downtime)',
+        };
+    }
+    if (scopeOnTags) {
+        return {
+            kind: 'scope',
+            coversAllGroups: true,
+            reason: `scope \`${downtime.scope}\` matches monitor tags`,
+        };
+    }
+    return null;
+}
+
+function maintenanceStateOf(matches: DowntimeMatch[], datadogIds: string[] | undefined): MaintenanceState {
+    // Datadog applies none of these downtimes (e.g. no current group matches the scope).
+    if (datadogIds && !matches.some((m) => datadogIds.includes(m.downtime.id))) {
+        return 'Not muting';
+    }
+    return matches.some((m) => m.coversAllGroups) ? 'Whole monitor' : 'Groups only';
+}
+
+/** Rows whose coverage is worth confirming with Datadog's own matcher. */
+export function needsDatadogCheck(row: Pick<CoverageRow, 'matches'>): boolean {
+    return row.matches.every((m) => m.kind !== 'direct' || !m.coversAllGroups);
+}
+
+const KIND_RANK: Record<MatchKind, number> = { direct: 0, tag: 1, scope: 2 };
+
+/** Most relevant first: direct > tag > scope, then full coverage, then most recently started. */
+function compareMatches(a: DowntimeMatch, b: DowntimeMatch): number {
+    return (
+        KIND_RANK[a.kind] - KIND_RANK[b.kind] ||
+        Number(b.coversAllGroups) - Number(a.coversAllGroups) ||
+        (b.startMs ?? 0) - (a.startMs ?? 0)
+    );
+}
+
+export function buildCoverageRows(
+    snapshot: LiveSnapshot,
+    nowMs: number,
+    users?: Record<string, UserSummary>,
+    /** Monitor id → downtime ids Datadog itself applies (from its downtime-matching API). */
+    verified?: Record<string, string[]>,
+    /** Creator ids whose names are still being looked up. */
+    resolvingIds?: Set<string>,
+): CoverageRow[] {
+    const activeDowntimes = snapshot.downtimes.filter((downtime) => isActiveDowntime(downtime, nowMs));
+    const rows: CoverageRow[] = [];
+
+    for (const monitor of snapshot.monitors) {
+        const matches: DowntimeMatch[] = [];
+        for (const downtime of activeDowntimes) {
+            const match = matchDowntime(monitor, downtime);
+            if (!match) {
+                continue;
+            }
+            matches.push({
+                ...match,
+                downtime,
+                startMs: toValidMs(downtime.start),
+                endMs: toValidMs(downtime.end),
+                creatorLabel:
+                    !users || (downtime.createdById && !users[downtime.createdById] && resolvingIds?.has(downtime.createdById))
+                        ? 'Resolving…'
+                        : userLabel(downtime.createdById ? users[downtime.createdById] : undefined, downtime.createdById),
+            });
+        }
+        if (matches.length === 0) {
+            continue;
+        }
+        matches.sort(compareMatches);
+        const hasDirect = matches.some((m) => m.kind === 'direct');
+        const hasIndirect = matches.some((m) => m.kind !== 'direct');
+        const latest = [...matches].sort((a, b) => (b.startMs ?? 0) - (a.startMs ?? 0))[0];
+        rows.push({
+            monitor,
+            matches,
+            primary: matches[0],
+            source: hasDirect && hasIndirect ? 'Direct + Tag/Scope' : hasDirect ? 'Direct (monitor ID)' : 'Tag/Scope-based',
+            maintenanceState: maintenanceStateOf(matches, verified?.[String(monitor.id)]),
+            windowState: windowStateOf(matches[0], nowMs),
+            owner: monitorOwner(monitor),
+            downtimeCreators: [...new Set(matches.map((m) => m.creatorLabel))],
+            latestMessage: latest.downtime.message?.trim() || null,
+        });
+    }
+
+    return rows.sort(
+        (a, b) => (b.primary.startMs ?? 0) - (a.primary.startMs ?? 0) || a.monitor.name.localeCompare(b.monitor.name),
+    );
+}

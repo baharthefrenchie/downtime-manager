@@ -7,6 +7,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 
 import App from './App';
+import './app.css';
 
 const queryClient = new QueryClient();
 const appRoot = document.getElementById('app');
@@ -16,7 +17,7 @@ if (appRoot) {
             <DatadogAppProvider>
                 <QueryClientProvider client={queryClient}>
                     <DruidsEnvironmentWithThemeInput
-                        backgroundColor="standard"
+                        backgroundColor="secondary"
                         defaultThemePreference="light"
                     >
                         <App />

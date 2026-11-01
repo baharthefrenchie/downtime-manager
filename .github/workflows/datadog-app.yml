@@ -1,0 +1,73 @@
+name: Datadog App
+
+# Pull requests: typecheck, lint, unit tests and a production build (no secrets needed).
+# Pushes to main: the same checks, then build, upload and publish the app live to Datadog.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Typecheck, lint, test, build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          # Matches the Datadog Apps backend runtime.
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Production build (no upload)
+        run: npm run build
+
+  deploy:
+    name: Deploy Datadog App
+    needs: checks
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    # Add required reviewers to this environment in GitHub to gate production deploys.
+    environment: datadog-production
+    # Never run two deploys at once; a newer push waits for the current deploy.
+    concurrency:
+      group: datadog-app-deploy
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Deploy
+        uses: DataDog/apps-github-action@2c2495d48c9569b6eace166a5d43e60d9e5b81da # v0.1.1
+        with:
+          datadog-api-key: ${{ secrets.DATADOG_API_KEY }}
+          datadog-app-key: ${{ secrets.DATADOG_APP_KEY }}
+          app-directory: .
