@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { Button } from '@datadog/druids/form/Button';
 import { ClockIcon } from '@datadog/druids/icons/Clock';
@@ -13,8 +13,9 @@ import { MessageBox } from '@datadog/druids/misc/MessageBox';
 import { StatusPill } from '@datadog/druids/pills/StatusPill';
 import { Text } from '@datadog/druids/typography/Text';
 
-import { windowStateOf, type CoverageRow, type DowntimeMatch } from './coverage';
+import { windowStateOf, type CoverageRow, type DatadogDowntimeMatch, type DowntimeMatch } from './coverage';
 import {
+    cancelBlockedReason,
     downtimeUrl,
     extendBlockedReason,
     formatEnd,
@@ -55,48 +56,34 @@ function Section({ title, children }: { title: string; children: React.ReactNode
     );
 }
 
-function DatadogConfirmation({ row }: { row: CoverageRow }) {
-    const query = useQuery({
-        queryKey: ['datadog-matches', row.monitor.id],
-        queryFn: () => fetchDatadogMatches(row.monitor.id),
-        staleTime: 60_000,
-    });
-
-    if (query.isLoading) {
-        return <MessageBox>Checking with Datadog which downtimes it applies to this monitor…</MessageBox>;
-    }
-    if (query.isError) {
+/**
+ * What Datadog itself says about this monitor. Uses Datadog's muted-monitor list
+ * from the snapshot, so it needs no extra request.
+ */
+function DatadogStatus({ row }: { row: CoverageRow }) {
+    if (row.maintenanceState === 'Not muting') {
         return (
-            <MessageBox level="warning" title="Couldn't confirm with Datadog">
-                {friendlyError(query.error, 'read downtimes')}
+            <MessageBox level="warning" title="Not muting anything right now">
+                Datadog doesn't report this monitor as muted: its downtimes don't match any current group.
             </MessageBox>
         );
     }
-
-    const datadogIds = new Set((query.data ?? []).map((match) => match.id));
-    const ours = row.matches.map((match) => match.downtime.id);
-    const unconfirmed = ours.filter((id) => !datadogIds.has(id));
-    const extra = [...datadogIds].filter((id) => !ours.includes(id));
-
-    if (unconfirmed.length === 0 && extra.length === 0) {
-        return (
-            <MessageBox level="success">
-                Confirmed: Datadog applies the same {ours.length} active {ours.length === 1 ? 'downtime' : 'downtimes'} to
-                this monitor.
-            </MessageBox>
-        );
-    }
+    const fromOutsideList = row.matches.some((match) => match.downtime.fromDatadogMatch);
     return (
-        <MessageBox level="warning" title="Datadog sees this monitor differently">
-            {unconfirmed.length > 0 && (
-                <Text as="p">
-                    Not applied by Datadog: {unconfirmed.join(', ')}. Tag/scope matching in this app is an estimate based on
-                    the monitor's tags.
-                </Text>
-            )}
-            {extra.length > 0 && <Text as="p">Also applied by Datadog: {extra.join(', ')}.</Text>}
+        <MessageBox level="success">
+            Datadog reports this monitor as muted.
+            {fromOutsideList && ' Its downtimes come from outside the downtime list, such as host auto-mutes.'}
         </MessageBox>
     );
+}
+
+const SWITCHER_LIMIT = 6;
+
+/** Short label for a downtime in the switcher: what it targets, then when it ends. */
+function switcherLabel(match: DowntimeMatch): string {
+    const scope = match.downtime.scope?.trim();
+    const target = match.kind === 'direct' ? 'Monitor ID' : scope && scope !== '*' ? scope : matchKindLabel(match);
+    return `${target.length > 42 ? `${target.slice(0, 41)}…` : target} · ${match.endMs === null ? 'no end' : formatEnd(match.endMs)}`;
 }
 
 interface DetailPanelProps {
@@ -106,13 +93,30 @@ interface DetailPanelProps {
     onClose: () => void;
     onCancel: (row: CoverageRow, match: DowntimeMatch) => void;
     onExtend: (row: CoverageRow, match: DowntimeMatch) => void;
+    /** Receives Datadog's downtimes for a monitor whose downtime isn't in the downtime list. */
+    onDatadogMatchesLoaded: (monitorId: number, matches: DatadogDowntimeMatch[]) => void;
 }
 
 /** Datadog-style side panel with the selected monitor's active downtime details. */
-export function DetailPanel({ row, nowMs, density, onClose, onCancel, onExtend }: DetailPanelProps) {
+export function DetailPanel({ row, nowMs, density, onClose, onCancel, onExtend, onDatadogMatchesLoaded }: DetailPanelProps) {
     const [selectedId, setSelectedId] = useState<string | null>(row ? row.primary.downtime.id : null);
+    const [showAllDowntimes, setShowAllDowntimes] = useState(false);
     const match = row?.matches.find((m) => m.downtime.id === selectedId) ?? row?.primary ?? null;
-    const downtimeId = match?.downtime.id ?? null;
+    const isPlaceholder = Boolean(match?.downtime.isPlaceholder);
+    const downtimeId = match && !isPlaceholder ? match.downtime.id : null;
+
+    // Monitors muted by downtimes outside the downtime list (e.g. host auto-mutes): ask Datadog
+    // which downtimes apply, once, when the panel opens.
+    const monitorId = row?.monitor.id ?? 0;
+    const datadogMatchesQuery = useQuery({
+        queryKey: ['datadog-matches', monitorId],
+        queryFn: () => fetchDatadogMatches(monitorId),
+        enabled: isPlaceholder && monitorId > 0,
+        staleTime: 5 * 60_000,
+    });
+    useEffect(() => {
+        if (datadogMatchesQuery.data && monitorId > 0) onDatadogMatchesLoaded(monitorId, datadogMatchesQuery.data);
+    }, [datadogMatchesQuery.data, monitorId, onDatadogMatchesLoaded]);
 
     const detailQuery = useQuery({
         queryKey: ['downtime-detail', downtimeId],
@@ -143,12 +147,14 @@ export function DetailPanel({ row, nowMs, density, onClose, onCancel, onExtend }
                         {monitorUrl(row.monitor.id) && (
                             <Button size="sm" href={monitorUrl(row.monitor.id) ?? undefined} isExternal label="Open monitor" />
                         )}
-                        <Button
-                            size="sm"
-                            href={downtimeUrl(match.downtime.id, raw?.url ?? match.downtime.url)}
-                            isExternal
-                            label="Open downtime"
-                        />
+                        {!isPlaceholder && (
+                            <Button
+                                size="sm"
+                                href={downtimeUrl(match.downtime.id, raw?.url ?? match.downtime.url)}
+                                isExternal
+                                label="Open downtime"
+                            />
+                        )}
                         <Button
                             size="sm"
                             icon={ClockIcon}
@@ -162,6 +168,8 @@ export function DetailPanel({ row, nowMs, density, onClose, onCancel, onExtend }
                             level="danger"
                             icon={TrashIcon}
                             label="Cancel downtime"
+                            isDisabled={Boolean(cancelBlockedReason(match))}
+                            tooltip={cancelBlockedReason(match) ?? undefined}
                             onClick={() => onCancel(row, match)}
                         />
                     </div>
@@ -187,21 +195,50 @@ export function DetailPanel({ row, nowMs, density, onClose, onCancel, onExtend }
                     <HorizontalSeparator />
 
                     <Section title="Downtime">
+                        {isPlaceholder && (
+                            <Spacing as="div" marginBottom="md">
+                                {datadogMatchesQuery.isError ? (
+                                    <MessageBox level="warning" title="Couldn't load this monitor's downtimes">
+                                        {friendlyError(datadogMatchesQuery.error, 'read downtimes')}
+                                    </MessageBox>
+                                ) : datadogMatchesQuery.data && datadogMatchesQuery.data.length === 0 ? (
+                                    <MessageBox level="warning">
+                                        Datadog no longer applies a downtime to this monitor. Refresh to update the table.
+                                    </MessageBox>
+                                ) : (
+                                    <MessageBox>
+                                        This monitor is muted by a downtime outside the downtime list (for example a host
+                                        auto-mute). Loading it from Datadog…
+                                    </MessageBox>
+                                )}
+                            </Spacing>
+                        )}
                         {row.matches.length > 1 && (
                             <Spacing as="div" marginBottom="md">
                                 <Text as="div" size="sm" variant="secondary" marginBottom="xs">
-                                    {row.matches.length} active downtimes cover this monitor:
+                                    {row.matches.length >= 100 ? '100+' : row.matches.length} active downtimes cover this
+                                    monitor:
                                 </Text>
                                 <div className="panel-actions">
-                                    {row.matches.map((m) => (
+                                    {(showAllDowntimes ? row.matches : row.matches.slice(0, SWITCHER_LIMIT)).map((m) => (
                                         <Button
                                             key={m.downtime.id}
                                             size="sm"
                                             isActive={m.downtime.id === match.downtime.id}
-                                            label={`${matchKindLabel(m)} · ${formatEnd(m.endMs)}`}
+                                            hasEllipsisWithTooltip
+                                            isTitleCased={false}
+                                            label={switcherLabel(m)}
                                             onClick={() => setSelectedId(m.downtime.id)}
                                         />
                                     ))}
+                                    {row.matches.length > SWITCHER_LIMIT && (
+                                        <Button
+                                            size="sm"
+                                            isNaked
+                                            label={showAllDowntimes ? 'Show fewer' : `Show all ${row.matches.length}`}
+                                            onClick={() => setShowAllDowntimes((value) => !value)}
+                                        />
+                                    )}
                                 </div>
                             </Spacing>
                         )}
@@ -271,7 +308,7 @@ export function DetailPanel({ row, nowMs, density, onClose, onCancel, onExtend }
                             </GridItem>
                         </Grid>
                         <Spacing as="div" marginTop="md">
-                            <DatadogConfirmation row={row} />
+                            <DatadogStatus row={row} />
                         </Spacing>
                     </Section>
                     <HorizontalSeparator />

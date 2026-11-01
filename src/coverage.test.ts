@@ -8,9 +8,10 @@ import { describe, it } from 'node:test';
 import {
     buildCoverageRows,
     isActiveDowntime,
-    needsDatadogCheck,
     toValidMs,
+    isPlaceholderRow,
     windowStateOf,
+    type DatadogDowntimeMatch,
     type LiveDowntime,
     type LiveMonitor,
     type LiveSnapshot,
@@ -52,7 +53,7 @@ function downtime(id: string, overrides: Partial<LiveDowntime> = {}): LiveDownti
     };
 }
 
-function rows(monitors: LiveMonitor[], downtimes: LiveDowntime[], verified?: Record<string, string[]>) {
+function rows(monitors: LiveMonitor[], downtimes: LiveDowntime[], verified?: Record<string, DatadogDowntimeMatch[]>) {
     const snapshot: LiveSnapshot = { monitors, downtimes, fetchedAt: new Date(NOW).toISOString() };
     return buildCoverageRows(snapshot, NOW, {}, verified);
 }
@@ -131,14 +132,37 @@ describe('buildCoverageRows', () => {
     it('marks group-scoped direct downtimes as Groups only', () => {
         const [row] = rows([monitor(1)], [downtime('g1', { monitorId: 1, scope: 'host:a' })]);
         assert.equal(row.maintenanceState, 'Groups only');
-        assert.equal(needsDatadogCheck(row), true);
     });
 
-    it('marks rows Datadog applies none of the downtimes to as Not muting', () => {
-        const [row] = rows([monitor(1)], [downtime('g1', { monitorId: 1, scope: 'host:a' })], { '1': [] });
-        assert.equal(row.maintenanceState, 'Not muting');
-        const [confirmed] = rows([monitor(1)], [downtime('g1', { monitorId: 1, scope: 'host:a' })], { '1': ['g1'] });
-        assert.equal(confirmed.maintenanceState, 'Groups only');
+    it('marks rows Not muting when Datadog does not report the monitor as muted', () => {
+        const scoped = [downtime('g1', { monitorId: 1, scope: 'host:a' })];
+        const base = { monitors: [monitor(1)], downtimes: scoped, fetchedAt: new Date(NOW).toISOString() };
+        const [notMuted] = buildCoverageRows({ ...base, datadogMutedIds: [] }, NOW);
+        assert.equal(notMuted.maintenanceState, 'Not muting');
+        const [muted] = buildCoverageRows({ ...base, datadogMutedIds: [1] }, NOW);
+        assert.equal(muted.maintenanceState, 'Groups only');
+    });
+
+    it('shows Datadog-muted monitors without a listed downtime, then fills in their downtimes', () => {
+        const snapshot: LiveSnapshot = {
+            monitors: [monitor(1), monitor(2)],
+            downtimes: [],
+            datadogMutedIds: [1],
+            fetchedAt: new Date(NOW).toISOString(),
+        };
+        const [placeholder, ...none] = buildCoverageRows(snapshot, NOW);
+        assert.equal(none.length, 0);
+        assert.equal(placeholder.monitor.id, 1);
+        assert.equal(isPlaceholderRow(placeholder), true);
+        assert.equal(placeholder.windowState, 'Unknown');
+        assert.equal(placeholder.maintenanceState, 'Groups only');
+
+        const auto = { id: 'auto1', scope: 'host:"i-123"', groups: ['host:i-123'], start: new Date(NOW - DAY).toISOString(), end: null };
+        const [row] = buildCoverageRows(snapshot, NOW, {}, { '1': [auto] });
+        assert.equal(isPlaceholderRow(row), false);
+        assert.equal(row.primary.downtime.id, 'auto1');
+        assert.equal(row.primary.downtime.fromDatadogMatch, true);
+        assert.equal(row.windowState, 'Open-ended');
     });
 
     it('prefers the direct downtime as the primary when several match', () => {

@@ -12,9 +12,12 @@ active downtimes, using live data from the Datadog org it runs in.
   (status `active`, start in the past or missing, end in the future or missing).
 - **Direct vs tag/scope coverage:** matches downtimes by `monitor_identifier.monitor_id`, and by
   monitor tags / scope compared against the monitor's tags.
-- **What is really muted:** *Whole monitor*, *Groups only*, or *Not muting*. Scoped and tag-based
-  coverage is double-checked with Datadog's own downtime matching, which catches downtimes whose
-  scope matches no current group.
+- **What is really muted:** *Whole monitor*, *Groups only*, or *Not muting*. Datadog's own list of
+  muted monitors (`muted:true`) is the source of truth, so the "Monitors in Maintenance" count
+  matches the Datadog Monitors page. Monitors muted by downtimes that the downtime list API doesn't
+  return (such as host auto-mutes) are included; their downtimes load from Datadog when you inspect
+  them. Monitors with an active downtime that mutes no current group are shown as *Not muting* and
+  aren't counted.
 - **Window state:** *Ending soon* (< 24h), *Scheduled end*, *Open-ended*, *Stale* (open-ended > 30d),
   with relative times. Open-ended downtimes show *Indefinitely*.
 - **Actions:** inspect (side panel with raw get-downtime JSON), **extend** and **cancel**. Both

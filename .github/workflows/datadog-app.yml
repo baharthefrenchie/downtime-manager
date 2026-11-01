@@ -15,7 +15,7 @@ permissions:
 jobs:
   checks:
     name: Typecheck, lint, test, build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -46,7 +46,7 @@ jobs:
     name: Deploy Datadog App
     needs: checks
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Add required reviewers to this environment in GitHub to gate production deploys.
     environment: datadog-production
     # Never run two deploys at once; a newer push waits for the current deploy.

@@ -28,6 +28,26 @@ export interface LiveDowntime {
     createdById: string | null;
     created: string | null;
     url: string | null;
+    /**
+     * True when this downtime was learned from Datadog's per-monitor matching
+     * rather than the downtime list (for example host auto-mutes, which the
+     * list API omits). Only id, scope and schedule are known up front.
+     */
+    fromDatadogMatch?: boolean;
+    /**
+     * Stand-in for a monitor Datadog reports muted whose downtime isn't in the
+     * downtime list yet; the real downtimes load when its details are opened.
+     */
+    isPlaceholder?: boolean;
+}
+
+/** One downtime Datadog itself applies to a monitor (from its downtime-matching API). */
+export interface DatadogDowntimeMatch {
+    id: string;
+    scope: string | null;
+    groups: string[];
+    start: string | null;
+    end: string | null;
 }
 
 export interface UserSummary {
@@ -40,6 +60,8 @@ export interface UserSummary {
 export interface LiveSnapshot {
     monitors: LiveMonitor[];
     downtimes: LiveDowntime[];
+    /** Monitors Datadog reports as muted (`muted:true`): the source of truth for "in maintenance". */
+    datadogMutedIds?: number[];
     fetchedAt: string;
 }
 
@@ -62,7 +84,7 @@ export type CoverageSource = 'Direct (monitor ID)' | 'Tag/Scope-based' | 'Direct
 export type MaintenanceState = 'Whole monitor' | 'Groups only' | 'Not muting';
 
 /** Where the primary downtime's window stands relative to now. */
-export type WindowState = 'Ending soon' | 'Scheduled end' | 'Open-ended' | 'Stale';
+export type WindowState = 'Ending soon' | 'Scheduled end' | 'Open-ended' | 'Stale' | 'Unknown';
 
 export const ENDING_SOON_MS = 24 * 60 * 60 * 1000;
 export const STALE_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
@@ -226,18 +248,59 @@ function matchDowntime(
     return null;
 }
 
-function maintenanceStateOf(matches: DowntimeMatch[], datadogIds: string[] | undefined): MaintenanceState {
-    // Datadog applies none of these downtimes (e.g. no current group matches the scope).
-    if (datadogIds && !matches.some((m) => datadogIds.includes(m.downtime.id))) {
+function maintenanceStateOf(matches: DowntimeMatch[], isMutedByDatadog: boolean | undefined): MaintenanceState {
+    // Datadog doesn't report the monitor as muted: its downtimes mute nothing right now
+    // (for example, no current group matches their scope).
+    if (isMutedByDatadog === false) {
         return 'Not muting';
     }
     return matches.some((m) => m.coversAllGroups) ? 'Whole monitor' : 'Groups only';
 }
 
-/** Rows whose coverage is worth confirming with Datadog's own matcher. */
-export function needsDatadogCheck(row: Pick<CoverageRow, 'matches'>): boolean {
-    return row.matches.every((m) => m.kind !== 'direct' || !m.coversAllGroups);
+function downtimeFromDatadogMatch(match: DatadogDowntimeMatch): LiveDowntime {
+    return {
+        id: match.id,
+        status: 'active',
+        message: null,
+        scope: match.scope,
+        displayTimezone: null,
+        monitorId: null,
+        monitorTags: ['*'],
+        start: match.start,
+        end: match.end,
+        isRecurring: false,
+        createdById: null,
+        created: null,
+        url: null,
+        fromDatadogMatch: true,
+    };
 }
+
+function placeholderDowntime(monitorId: number): LiveDowntime {
+    return {
+        id: `datadog-muted-${monitorId}`,
+        status: 'active',
+        message: null,
+        scope: null,
+        displayTimezone: null,
+        monitorId: null,
+        monitorTags: ['*'],
+        start: null,
+        end: null,
+        isRecurring: false,
+        createdById: null,
+        created: null,
+        url: null,
+        fromDatadogMatch: true,
+        isPlaceholder: true,
+    };
+}
+
+/** True when a row stands in for a Datadog-muted monitor whose downtimes haven't loaded yet. */
+export function isPlaceholderRow(row: Pick<CoverageRow, 'primary'>): boolean {
+    return Boolean(row.primary.downtime.isPlaceholder);
+}
+
 
 const KIND_RANK: Record<MatchKind, number> = { direct: 0, tag: 1, scope: 2 };
 
@@ -254,31 +317,65 @@ export function buildCoverageRows(
     snapshot: LiveSnapshot,
     nowMs: number,
     users?: Record<string, UserSummary>,
-    /** Monitor id → downtime ids Datadog itself applies (from its downtime-matching API). */
-    verified?: Record<string, string[]>,
+    /**
+     * Monitor id → downtimes Datadog itself applies (from its downtime-matching API),
+     * fetched for muted monitors the downtime list can't explain.
+     */
+    verified?: Record<string, DatadogDowntimeMatch[]>,
     /** Creator ids whose names are still being looked up. */
     resolvingIds?: Set<string>,
 ): CoverageRow[] {
     const activeDowntimes = snapshot.downtimes.filter((downtime) => isActiveDowntime(downtime, nowMs));
     const rows: CoverageRow[] = [];
 
+    const creatorLabelOf = (downtime: LiveDowntime) => {
+        if (downtime.fromDatadogMatch) return 'Not in downtime list';
+        if (!users || (downtime.createdById && !users[downtime.createdById] && resolvingIds?.has(downtime.createdById))) {
+            return 'Resolving…';
+        }
+        return userLabel(downtime.createdById ? users[downtime.createdById] : undefined, downtime.createdById);
+    };
+    const toMatch = (downtime: LiveDowntime, match: Pick<DowntimeMatch, 'kind' | 'coversAllGroups' | 'reason'>) => ({
+        ...match,
+        downtime,
+        startMs: toValidMs(downtime.start),
+        endMs: toValidMs(downtime.end),
+        creatorLabel: creatorLabelOf(downtime),
+    });
+
+    const datadogMuted = snapshot.datadogMutedIds ? new Set(snapshot.datadogMutedIds) : null;
+
     for (const monitor of snapshot.monitors) {
         const matches: DowntimeMatch[] = [];
         for (const downtime of activeDowntimes) {
             const match = matchDowntime(monitor, downtime);
-            if (!match) {
-                continue;
-            }
-            matches.push({
-                ...match,
-                downtime,
-                startMs: toValidMs(downtime.start),
-                endMs: toValidMs(downtime.end),
-                creatorLabel:
-                    !users || (downtime.createdById && !users[downtime.createdById] && resolvingIds?.has(downtime.createdById))
-                        ? 'Resolving…'
-                        : userLabel(downtime.createdById ? users[downtime.createdById] : undefined, downtime.createdById),
-            });
+            if (match) matches.push(toMatch(downtime, match));
+        }
+        // Downtimes Datadog applies that the downtime list doesn't include (e.g. host auto-mutes).
+        const datadogMatches = verified?.[String(monitor.id)];
+        datadogMatches?.forEach((datadogMatch) => {
+            if (matches.some((m) => m.downtime.id === datadogMatch.id)) return;
+            const downtime = downtimeFromDatadogMatch(datadogMatch);
+            if (!isActiveDowntime(downtime, nowMs)) return;
+            const groups = datadogMatch.groups.filter((group) => group && group !== 'None');
+            matches.push(
+                toMatch(downtime, {
+                    kind: 'scope',
+                    coversAllGroups: isAllGroupsScope(datadogMatch.scope),
+                    reason: `Datadog applies scope \`${datadogMatch.scope ?? '*'}\`${groups.length ? ` to ${groups.slice(0, 3).join(', ')}${groups.length > 3 ? '…' : ''}` : ''}`,
+                }),
+            );
+        });
+        // Datadog reports the monitor muted, but its downtime isn't in the downtime list
+        // (e.g. a host auto-mute): show it now, load the real downtimes on demand.
+        if (matches.length === 0 && datadogMuted?.has(monitor.id)) {
+            matches.push(
+                toMatch(placeholderDowntime(monitor.id), {
+                    kind: 'scope',
+                    coversAllGroups: false,
+                    reason: 'Muted by a downtime outside the downtime list, such as a host auto-mute',
+                }),
+            );
         }
         if (matches.length === 0) {
             continue;
@@ -292,8 +389,8 @@ export function buildCoverageRows(
             matches,
             primary: matches[0],
             source: hasDirect && hasIndirect ? 'Direct + Tag/Scope' : hasDirect ? 'Direct (monitor ID)' : 'Tag/Scope-based',
-            maintenanceState: maintenanceStateOf(matches, verified?.[String(monitor.id)]),
-            windowState: windowStateOf(matches[0], nowMs),
+            maintenanceState: maintenanceStateOf(matches, datadogMuted ? datadogMuted.has(monitor.id) : undefined),
+            windowState: matches[0].downtime.isPlaceholder ? 'Unknown' : windowStateOf(matches[0], nowMs),
             owner: monitorOwner(monitor),
             downtimeCreators: [...new Set(matches.map((m) => m.creatorLabel))],
             latestMessage: latest.downtime.message?.trim() || null,
