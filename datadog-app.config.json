@@ -1,0 +1,7 @@
+{
+  "$schema": "https://unpkg.com/@datadog/create-apps/dist/datadog-app.config.schema.json",
+  "datadogSite": "datadoghq.com",
+  "id": "dc509d6c-4b0d-4868-88bd-a143c06b0ef8",
+  "name": "oncall-downtime",
+  "tags": []
+}

@@ -1,0 +1,48 @@
+{
+  "name": "oncall-downtime",
+  "version": "0.0.1",
+  "private": true,
+  "engines": {
+    "node": "^20.19.0 || >=22.13.0"
+  },
+  "scripts": {
+    "dev": "npx datadog-apps dev",
+    "dev:verify": "npx datadog-apps dev --mode dev-verify",
+    "build": "npx datadog-apps build",
+    "upload": "npx datadog-apps upload",
+    "cli": "npx datadog-apps",
+    "lint": "eslint . --report-unused-disable-directives --max-warnings 0",
+    "lint:fix": "eslint . --fix",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@datadog/action-catalog": "^0.0.7",
+    "@datadog/apps-backend": ">=0.0.1 <0.1.0",
+    "@datadog/apps-frontend": ">=0.0.10 <0.1.0",
+    "@datadog/druids": "^0.0.7",
+    "@tanstack/react-query": "^5.104.1",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "optionalDependencies": {
+    "@napi-rs/keyring": "^1.3.0"
+  },
+  "devDependencies": {
+    "@datadog/apps-cli": ">=0.0.3 <0.1.0",
+    "@datadog/vite-plugin": "^3.4.0",
+    "@eslint/js": "^9.39.5",
+    "@types/node": "^24.19.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "esbuild": "^0.28.0",
+    "eslint": "^9.39.5",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.7",
+    "globals": "^17.13.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.71.1",
+    "vite": "^8.3.4"
+  }
+}
