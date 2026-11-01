@@ -18,6 +18,7 @@ import {
     type LiveSnapshot,
     type UserSummary,
 } from './coverage';
+import { extensionSchedule } from './schedule';
 
 const DOWNTIME_ID_PATTERN = /^[A-Za-z0-9-]{1,64}$/;
 // Full monitor objects are ~18 KB each and actions cap responses at 10 MB, so
@@ -326,8 +327,8 @@ export async function extendActiveDowntime(
     }
 
     const end = new Date(newEndMs).toISOString();
-    // Only the end is sent so the existing start is left untouched.
-    await updateDowntime({ inputs: { downtime_id: id, id, schedule: { end } } });
+    // Resend the current start unchanged: without it Datadog treats the update as "start now".
+    await updateDowntime({ inputs: { downtime_id: id, id, schedule: extensionSchedule(schedule?.start, end) } });
     return { downtimeId: id, end };
 }
 
