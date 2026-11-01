@@ -109,6 +109,9 @@ export function formatRelative(ms: number | null, nowMs: number): string | null 
 }
 
 export function windowDetail(match: DowntimeMatch, state: WindowState, nowMs: number): string {
+    if (match.downtime.isPlaceholder) {
+        return 'Inspect to load from Datadog';
+    }
     if (match.endMs !== null) {
         return `Ends ${formatRelative(match.endMs, nowMs)}`;
     }
@@ -121,6 +124,9 @@ export function windowDetail(match: DowntimeMatch, state: WindowState, nowMs: nu
 
 /** Human label for what the downtime silences: the whole monitor or specific groups. */
 export function mutedScopeLabel(match: DowntimeMatch): string {
+    if (match.downtime.isPlaceholder) {
+        return 'Some groups (scope loads on inspect)';
+    }
     const scope = match.downtime.scope?.trim();
     return match.coversAllGroups || !scope || scope === '*' ? 'All groups' : scope;
 }
@@ -257,8 +263,18 @@ export function downloadFile(filename: string, content: string, mimeType: string
     }
 }
 
+export const PLACEHOLDER_ACTION_HINT = "Inspect this monitor first to load its downtimes from Datadog.";
+
+/** Why a downtime can't be canceled from this app, or null if it can. */
+export function cancelBlockedReason(match: DowntimeMatch): string | null {
+    return match.downtime.isPlaceholder ? PLACEHOLDER_ACTION_HINT : null;
+}
+
 /** Why a downtime can't be extended from this app, or null if it can. */
 export function extendBlockedReason(match: DowntimeMatch): string | null {
+    if (match.downtime.isPlaceholder) {
+        return PLACEHOLDER_ACTION_HINT;
+    }
     if (match.downtime.isRecurring) {
         return 'Recurring downtime: edit the recurrence in Datadog.';
     }

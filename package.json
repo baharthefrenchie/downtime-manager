@@ -2,6 +2,7 @@
   "name": "oncall-downtime",
   "version": "0.0.1",
   "private": true,
+  "type": "module",
   "engines": {
     "node": "^20.19.0 || >=22.13.0"
   },
@@ -21,7 +22,7 @@
     "@datadog/action-catalog": "^0.0.7",
     "@datadog/apps-backend": ">=0.0.1 <0.1.0",
     "@datadog/apps-frontend": ">=0.0.10 <0.1.0",
-    "@datadog/druids": "^0.0.7",
+    "@datadog/druids": "^0.1.0",
     "@tanstack/react-query": "^5.104.1",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
@@ -45,5 +46,19 @@
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.71.1",
     "vite": "^8.3.4"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "esbuild@0.25.8": true,
+    "fsevents": false
+  },
+  "overrides": {
+    "react-popper": {
+      "react": "$react",
+      "react-dom": "$react-dom"
+    },
+    "react-table": {
+      "react": "$react"
+    }
   }
 }

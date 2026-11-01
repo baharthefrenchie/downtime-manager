@@ -12,6 +12,7 @@ import { getUser, type SimplifiedUser } from '@datadog/action-catalog/dd/users';
 import {
     buildCoverageRows,
     isActiveDowntime,
+    type DatadogDowntimeMatch,
     type LiveDowntime,
     type LiveMonitor,
     type LiveSnapshot,
@@ -95,6 +96,25 @@ async function listAllMonitors(): Promise<LiveMonitor[]> {
     return [...byId.values()];
 }
 
+/**
+ * Ids of every monitor Datadog itself reports as muted (`muted:true`). This is
+ * the source of truth for "in maintenance": it includes monitors muted by
+ * downtimes the downtime list API doesn't return, such as host auto-mutes.
+ */
+async function listDatadogMutedMonitorIds(): Promise<number[]> {
+    const ids: number[] = [];
+    for (let page = 0; page < MAX_MONITOR_PAGES; page++) {
+        const response = await searchMonitors({ inputs: { page, per_page: MONITOR_PAGE_SIZE, query: 'muted:true' } });
+        const batch = toArray<MonitorSearchResult>(response?.monitors);
+        batch.forEach((monitor) => {
+            const id = Number(monitor?.id);
+            if (Number.isInteger(id) && id > 0) ids.push(id);
+        });
+        if (batch.length < MONITOR_PAGE_SIZE) break;
+    }
+    return ids;
+}
+
 function toMonitorId(value: unknown): number | null {
     const id = Number(value);
     return value != null && Number.isInteger(id) && id > 0 ? id : null;
@@ -138,7 +158,7 @@ function slimDowntime(downtime: EnrichedDowntimeV2): LiveDowntime {
 
 const USER_ID_PATTERN = /^[A-Za-z0-9-]{1,64}$/;
 const USER_BATCH_LIMIT = 50;
-const USER_LOOKUP_CONCURRENCY = 3;
+const USER_LOOKUP_CONCURRENCY = 2;
 
 function isRateLimited(error: unknown): boolean {
     return /429|too many requests/i.test(error instanceof Error ? error.message : String(error));
@@ -219,9 +239,10 @@ export async function resolveUsers(userIds: string[]): Promise<ResolvedUsers> {
  * same matching on this subset, so filters still operate on one dataset.
  */
 export async function loadMaintenanceSnapshot(): Promise<LiveSnapshot> {
-    const [monitors, downtimesResponse] = await Promise.all([
+    const [monitors, downtimesResponse, datadogMutedIds] = await Promise.all([
         listAllMonitors(),
         listDowntimesV2({ inputs: { current_only: true, page_limit: 1000 } }),
+        listDatadogMutedMonitorIds(),
     ]);
     const nowMs = Date.now();
     const downtimes = toArray<EnrichedDowntimeV2>(downtimesResponse?.downtimes)
@@ -229,11 +250,15 @@ export async function loadMaintenanceSnapshot(): Promise<LiveSnapshot> {
         .filter((downtime) => isActiveDowntime(downtime, nowMs));
     const fetchedAt = new Date(nowMs).toISOString();
     const covered = buildCoverageRows({ monitors, downtimes, fetchedAt }, nowMs);
-    const coveredIds = new Set(covered.flatMap((row) => row.matches.map((m) => m.downtime.id)));
+    const coveredDowntimeIds = new Set(covered.flatMap((row) => row.matches.map((m) => m.downtime.id)));
+    // Keep covered monitors plus any monitor Datadog reports muted; the frontend
+    // fetches Datadog's own downtime matches for the latter in the background.
+    const keepIds = new Set([...covered.map((row) => row.monitor.id), ...datadogMutedIds]);
 
     return {
-        monitors: covered.map((row) => row.monitor),
-        downtimes: downtimes.filter((downtime) => coveredIds.has(downtime.id)),
+        monitors: monitors.filter((monitor) => keepIds.has(monitor.id)),
+        downtimes: downtimes.filter((downtime) => coveredDowntimeIds.has(downtime.id)),
+        datadogMutedIds,
         fetchedAt,
     };
 }
@@ -306,24 +331,19 @@ export async function extendActiveDowntime(
     return { downtimeId: id, end };
 }
 
-export interface DatadogDowntimeMatch {
-    id: string;
-    scope: string | null;
-    groups: string[];
-    start: string | null;
-    end: string | null;
-}
 
 /**
- * Asks Datadog which active downtimes it applies to a monitor. Used by the
- * detail panel to confirm the app's own direct/tag/scope matching.
+ * Asks Datadog which active downtimes it applies to a monitor. The detail
+ * panel calls this on demand for monitors Datadog reports muted whose
+ * downtimes aren't in the downtime list (for example host auto-mutes).
  */
-export async function fetchDatadogMatches(monitorId: number): Promise<DatadogDowntimeMatch[]> {
+export async function fetchDatadogMatches(monitorId: number, pageLimit = 100): Promise<DatadogDowntimeMatch[]> {
     const id = Number(monitorId);
     if (!Number.isInteger(id) || id <= 0) {
         throw new Error('Invalid monitor id.');
     }
-    const response = await listMonitorDowntimesV2({ inputs: { monitor_id: id, page_limit: 100 } });
+    const limit = Math.min(Math.max(Math.trunc(Number(pageLimit)) || 100, 1), 100);
+    const response = await listMonitorDowntimesV2({ inputs: { monitor_id: id, page_limit: limit } });
     return toArray<{ id: string; scope?: string; groups?: string[]; start?: string; end?: string }>(
         response?.downtimeMatches,
     ).map((match) => ({
@@ -334,33 +354,3 @@ export async function fetchDatadogMatches(monitorId: number): Promise<DatadogDow
         end: match.end ?? null,
     }));
 }
-
-const MAX_VERIFY_MONITORS = 80;
-const VERIFY_CONCURRENCY = 4;
-
-/**
- * Asks Datadog which downtimes it currently applies to each monitor (batched,
- * throttled). Group-scoped downtimes only count when a current group matches
- * the scope, so this catches downtimes that mute nothing right now.
- * Returns monitor id → downtime ids Datadog applies; failed lookups are omitted.
- */
-export async function verifyWithDatadog(monitorIds: number[]): Promise<Record<string, string[]>> {
-    const ids = [...new Set(Array.isArray(monitorIds) ? monitorIds : [])]
-        .map(Number)
-        .filter((id) => Number.isInteger(id) && id > 0)
-        .slice(0, MAX_VERIFY_MONITORS);
-    const verified: Record<string, string[]> = {};
-    let next = 0;
-    const worker = async () => {
-        while (next < ids.length) {
-            const monitorId = ids[next++];
-            const matches = await withRateLimitRetry(() => fetchDatadogMatches(monitorId));
-            if (matches) {
-                verified[String(monitorId)] = matches.map((match) => match.id);
-            }
-        }
-    };
-    await Promise.all(Array.from({ length: VERIFY_CONCURRENCY }, worker));
-    return verified;
-}
-

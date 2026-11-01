@@ -6,16 +6,18 @@ import { resolveUsers } from './maintenance.backend';
 
 const NAMES_MAX_AGE_MS = 7 * 24 * 60 * 60_000;
 const UNKNOWN_MAX_AGE_MS = 24 * 60 * 60_000;
-const BATCH_SIZE = 50;
+const BATCH_SIZE = 25;
+// Datadog's users API allows few calls per minute; spacing batches avoids 429 bursts.
+const PAUSE_BETWEEN_BATCHES_MS = 4000;
+// Lookups that were rate-limited (neither found nor unknown) are retried this many times.
+const MAX_ATTEMPTS = 3;
 
 /**
  * Resolves downtime-creator ids to names. Known names come from this
- * browser's cache instantly; only missing ids are looked up, in batches, in
- * the order given (table order, so visible rows resolve first). While
- * `isPaused` is true only the first batch runs, leaving rate-limit headroom
- * for higher-priority calls.
+ * browser's cache instantly; only missing ids are looked up, in small spaced
+ * batches, in the order given (table order, so the first rows resolve first).
  */
-export function useCreatorNames(userIds: string[], isPaused = false) {
+export function useCreatorNames(userIds: string[]) {
     const [users, setUsers] = useState<Record<string, UserSummary>>(
         () => readCache<Record<string, UserSummary>>('user-names', NAMES_MAX_AGE_MS)?.value ?? {},
     );
@@ -27,16 +29,10 @@ export function useCreatorNames(userIds: string[], isPaused = false) {
     // Latest maps for the async loop without re-triggering it on every batch.
     const usersRef = useRef(users);
     const unknownRef = useRef(unknown);
-    const pausedRef = useRef(isPaused);
-    const resumeRef = useRef<(() => void) | null>(null);
     useEffect(() => {
         usersRef.current = users;
         unknownRef.current = unknown;
     }, [users, unknown]);
-    useEffect(() => {
-        pausedRef.current = isPaused;
-        if (!isPaused) resumeRef.current?.();
-    }, [isPaused]);
 
     // Keep the caller's order (table order); only dedupe.
     const idsKey = useMemo(() => [...new Set(userIds)].join(','), [userIds]);
@@ -50,16 +46,28 @@ export function useCreatorNames(userIds: string[], isPaused = false) {
         let cancelled = false;
         const run = async () => {
             setInFlight(new Set(missing));
-            for (let i = 0; i < missing.length && !cancelled; i += BATCH_SIZE) {
-                if (i > 0 && pausedRef.current) {
-                    await new Promise<void>((resolve) => (resumeRef.current = resolve));
-                    resumeRef.current = null;
+            const queue = [...missing];
+            const attempts = new Map<string, number>();
+            let isFirstBatch = true;
+            while (queue.length > 0 && !cancelled) {
+                if (!isFirstBatch) {
+                    await new Promise((resolve) => setTimeout(resolve, PAUSE_BETWEEN_BATCHES_MS));
                     if (cancelled) return;
                 }
-                const batch = missing.slice(i, i + BATCH_SIZE);
+                isFirstBatch = false;
+                const batch = queue.splice(0, BATCH_SIZE);
+                let done = batch;
                 try {
                     const { found, notFound } = await resolveUsers(batch);
                     if (cancelled) return;
+                    // Neither found nor unknown means the lookup was rate-limited: retry it later.
+                    const retry = batch.filter((id) => !found[id] && !notFound.includes(id));
+                    retry.forEach((id) => {
+                        const tries = (attempts.get(id) ?? 0) + 1;
+                        attempts.set(id, tries);
+                        if (tries < MAX_ATTEMPTS) queue.push(id);
+                    });
+                    done = batch.filter((id) => !queue.includes(id));
                     setUsers((previous) => {
                         const next = { ...previous, ...found };
                         writeCache('user-names', next);
@@ -78,7 +86,7 @@ export function useCreatorNames(userIds: string[], isPaused = false) {
                 }
                 setInFlight((previous) => {
                     const next = new Set(previous);
-                    batch.forEach((id) => next.delete(id));
+                    done.forEach((id) => next.delete(id));
                     return next;
                 });
             }
@@ -86,7 +94,6 @@ export function useCreatorNames(userIds: string[], isPaused = false) {
         void run();
         return () => {
             cancelled = true;
-            resumeRef.current?.();
         };
     }, [idsKey]);
 

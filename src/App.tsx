@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
 
 import { Button } from '@datadog/druids/form/Button';
 import { Checkbox } from '@datadog/druids/form/Checkbox';
@@ -16,24 +16,22 @@ import { CalloutValue } from '@datadog/druids/measures/CalloutValue';
 import { MessageBox } from '@datadog/druids/misc/MessageBox';
 import { StatusPill } from '@datadog/druids/pills/StatusPill';
 import { Table, type TableColumn } from '@datadog/druids/table/Table';
-import { DateRangePicker } from '@datadog/druids/time/DateRangePicker';
 import { Text } from '@datadog/druids/typography/Text';
 
 import datadogLogo from './assets/datadog-logo.png';
 import { readCache, writeCache } from './cache';
 import {
     buildCoverageRows,
-    needsDatadogCheck,
+    type DatadogDowntimeMatch,
     type CoverageRow,
     type DowntimeMatch,
     type LiveSnapshot,
     type MaintenanceState,
     type WindowState,
 } from './coverage';
-import { DetailPanel } from './DetailPanel';
-import { CancelDowntimeModal, ExtendDowntimeModal } from './DowntimeModals';
 import {
     coverageSummary,
+    cancelBlockedReason,
     downloadFile,
     extendBlockedReason,
     formatEnd,
@@ -56,14 +54,26 @@ import {
     cancelActiveDowntime,
     extendActiveDowntime,
     loadMaintenanceSnapshot,
-    verifyWithDatadog,
 } from './maintenance.backend';
+
+// Loaded on first use (and prefetched once the table is on screen) to keep the
+// initial bundle small: nobody needs these to see which monitors are muted.
+const loadDetailPanel = () => import('./DetailPanel');
+const loadModals = () => import('./DowntimeModals');
+const loadDateRangePicker = () => import('@datadog/druids/time/DateRangePicker');
+const DetailPanel = lazy(() => loadDetailPanel().then((m) => ({ default: m.DetailPanel })));
+const CancelDowntimeModal = lazy(() => loadModals().then((m) => ({ default: m.CancelDowntimeModal })));
+const ExtendDowntimeModal = lazy(() => loadModals().then((m) => ({ default: m.ExtendDowntimeModal })));
+const DateRangePicker = lazy(() => loadDateRangePicker().then((m) => ({ default: m.DateRangePicker })));
+
+const DEFAULT_PAGE_SIZE = 25;
+const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
 
 const SNAPSHOT_QUERY_KEY = ['maintenance-snapshot'] as const;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const REFRESH_MS = 5 * 60_000;
+const ON_DEMAND_MATCHES_MAX_AGE_MS = 30 * 60_000;
 const SNAPSHOT_CACHE_MAX_AGE_MS = 6 * 60 * 60_000;
-const VERIFY_CACHE_MAX_AGE_MS = 30 * 60_000;
 
 type Option<T extends string> = { label: string; value: T };
 type MaintenanceFilter = 'all' | MaintenanceState;
@@ -109,7 +119,6 @@ function App() {
     // Last-known data from this browser paints instantly; live data replaces it moments later.
     const [mountedAt] = useState(() => Date.now());
     const [cachedSnapshot] = useState(() => readCache<LiveSnapshot>('snapshot', SNAPSHOT_CACHE_MAX_AGE_MS));
-    const [cachedVerified] = useState(() => readCache<Record<string, string[]>>('verified', VERIFY_CACHE_MAX_AGE_MS));
 
     const snapshotQuery = useQuery({
         queryKey: SNAPSHOT_QUERY_KEY,
@@ -134,21 +143,18 @@ function App() {
     );
 
     // Confirm scoped and tag/scope-based coverage with Datadog's own matcher (throttled, cached).
-    const verifyIds = useMemo(
-        () => baseRows.filter(needsDatadogCheck).map((row) => row.monitor.id).sort((a, b) => a - b),
-        [baseRows],
+    // Downtimes Datadog applies to monitors whose downtime isn't in the downtime list (e.g. host
+    // auto-mutes). Loaded on demand when such a monitor is inspected, cached per browser.
+    const [verified, setVerified] = useState<Record<string, DatadogDowntimeMatch[]>>(
+        () => readCache<Record<string, DatadogDowntimeMatch[]>>('datadog-matches-on-demand', ON_DEMAND_MATCHES_MAX_AGE_MS)?.value ?? {},
     );
-    const verifyQuery = useQuery({
-        queryKey: ['datadog-verify', verifyIds],
-        queryFn: () => verifyWithDatadog(verifyIds),
-        enabled: verifyIds.length > 0,
-        staleTime: REFRESH_MS,
-        placeholderData: (previous) => previous ?? cachedVerified?.value,
-    });
-    const verified = verifyQuery.data;
-    useEffect(() => {
-        if (verified && !verifyQuery.isPlaceholderData) writeCache('verified', verified);
-    }, [verified, verifyQuery.isPlaceholderData]);
+    const onDatadogMatchesLoaded = useCallback((monitorId: number, matches: DatadogDowntimeMatch[]) => {
+        setVerified((previous) => {
+            const next = { ...previous, [String(monitorId)]: matches };
+            writeCache('datadog-matches-on-demand', next);
+            return next;
+        });
+    }, []);
 
     // Creator names: cached per browser, only missing ids are looked up (in batches).
     const creatorIds = useMemo(() => {
@@ -156,8 +162,8 @@ function App() {
         baseRows.forEach((row) => row.matches.forEach((m) => m.downtime.createdById && ids.add(m.downtime.createdById)));
         return [...ids];
     }, [baseRows]);
-    // Visible rows' names resolve first; the rest wait for the Datadog check to finish.
-    const { users, resolvingIds } = useCreatorNames(creatorIds, verifyQuery.isFetching);
+    // Names for the rows at the top of the table resolve first.
+    const { users, resolvingIds } = useCreatorNames(creatorIds);
 
     const rows = useMemo(
         () => (snapshot ? buildCoverageRows(snapshot, dataUpdatedAt, users, verified, resolvingIds) : []),
@@ -204,15 +210,32 @@ function App() {
         [rows, filters.owners, maintenanceFilter, windowFilter, isDateFilterEnabled, rangeStart, rangeEnd],
     );
 
+    // Cards count monitors that are actually muted, matching Datadog's own "muted" count;
+    // "Not muting" rows stay in the table but aren't counted.
     const summary = useMemo(() => {
         const downtimeIds = new Set<string>();
         const owners = new Set<string>();
+        let monitors = 0;
         filteredRows.forEach((row) => {
-            row.matches.forEach((m) => downtimeIds.add(m.downtime.id));
+            if (row.maintenanceState === 'Not muting') return;
+            monitors += 1;
+            row.matches.forEach((m) => {
+                if (!m.downtime.isPlaceholder) downtimeIds.add(m.downtime.id);
+            });
             owners.add(row.owner);
         });
-        return { monitors: filteredRows.length, downtimes: downtimeIds.size, owners: owners.size };
+        return { monitors, downtimes: downtimeIds.size, owners: owners.size };
     }, [filteredRows]);
+
+    // Prefetch the lazily loaded panel, dialogs and date picker once data is on screen,
+    // so the first click doesn't wait on a download.
+    const hasData = Boolean(snapshot);
+    useEffect(() => {
+        if (!hasData) return;
+        void loadDetailPanel();
+        void loadModals();
+        void loadDateRangePicker();
+    }, [hasData]);
 
     // ---- Detail panel (selected monitor lives in the URL as ?monitor=) ----
     const detailRow = useMemo(
@@ -498,7 +521,8 @@ function App() {
                                 level="danger"
                                 icon={TrashIcon}
                                 ariaLabel="Cancel downtime"
-                                tooltip="Cancel downtime"
+                                tooltip={cancelBlockedReason(primary) ?? 'Cancel downtime'}
+                                isDisabled={Boolean(cancelBlockedReason(primary))}
                                 onClick={() => openCancel(row.original, primary)}
                             />
                         </div>
@@ -598,7 +622,7 @@ function App() {
                 <CalloutValue
                     className="surface"
                     size={isNarrow ? 'sm' : 'md'}
-                    label={isNarrow ? 'In maintenance' : 'Monitors in Maintenance'}
+                    label={isNarrow ? 'Muted' : 'Monitors in Maintenance'}
                     value={summary.monitors}
                     isLoading={snapshotQuery.isLoading}
                 />
@@ -670,11 +694,16 @@ function App() {
                         }
                     />
                     {isDateFilterEnabled && (
-                        <DateRangePicker
-                            canPickFutureDates
-                            timeFrame={{ start: rangeStart, end: rangeEnd, paused: true }}
-                            setTimeFrame={(timeFrame) => setFilters({ from: timeFrame.start, to: timeFrame.end })}
-                        />
+                        <Suspense fallback={null}>
+                            <DateRangePicker
+                                canPickFutureDates
+                                hasRewind={false}
+                                hasPlay={false}
+                                hasForward={false}
+                                timeFrame={{ start: rangeStart, end: rangeEnd, paused: true }}
+                                setTimeFrame={(timeFrame) => setFilters({ from: timeFrame.start, to: timeFrame.end })}
+                            />
+                        </Suspense>
                     )}
                     {hasFilters && (
                         <Button
@@ -708,7 +737,11 @@ function App() {
                         isBorderless
                         size="sm"
                         sorting
-                        pagination={{ pageSize: isNarrow ? 25 : 50, hasPageSizeSelector: !isNarrow }}
+                        pagination={{
+                            pageSize: DEFAULT_PAGE_SIZE,
+                            pageSizeOptions: PAGE_SIZE_OPTIONS,
+                            hasPageSizeSelector: !isNarrow,
+                        }}
                         emptyState={{
                             title: rows.length === 0 ? 'No monitors are in maintenance' : 'No monitors match these filters',
                             subtitle:
@@ -725,31 +758,40 @@ function App() {
                 </div>
             </section>
 
-            <DetailPanel
-                key={detailRow ? `detail-${detailRow.monitor.id}` : 'detail-none'}
-                row={detailRow}
-                nowMs={dataUpdatedAt}
-                density={density}
-                onClose={closeDetail}
-                onCancel={openCancel}
-                onExtend={openExtend}
-            />
-            <CancelDowntimeModal
-                target={cancelTarget}
-                isPending={cancelMutation.isPending}
-                error={cancelMutation.error ? friendlyError(cancelMutation.error, 'cancel downtimes') : null}
-                onClose={() => setCancelTarget(null)}
-                onConfirm={(downtimeId) => cancelMutation.mutate(downtimeId)}
-            />
-            <ExtendDowntimeModal
-                key={extendTarget ? `extend-${extendTarget.match.downtime.id}` : 'extend-none'}
-                target={extendTarget}
-                nowMs={dataUpdatedAt}
-                isPending={extendMutation.isPending}
-                error={extendMutation.error ? friendlyError(extendMutation.error, 'extend downtimes') : null}
-                onClose={() => setExtendTarget(null)}
-                onConfirm={(downtimeId, newEndIso) => extendMutation.mutate({ downtimeId, newEndIso })}
-            />
+            <Suspense fallback={null}>
+                {detailRow && (
+                    <DetailPanel
+                        key={`detail-${detailRow.monitor.id}`}
+                        row={detailRow}
+                        nowMs={dataUpdatedAt}
+                        density={density}
+                        onClose={closeDetail}
+                        onCancel={openCancel}
+                        onExtend={openExtend}
+                        onDatadogMatchesLoaded={onDatadogMatchesLoaded}
+                    />
+                )}
+                {cancelTarget && (
+                    <CancelDowntimeModal
+                        target={cancelTarget}
+                        isPending={cancelMutation.isPending}
+                        error={cancelMutation.error ? friendlyError(cancelMutation.error, 'cancel downtimes') : null}
+                        onClose={() => setCancelTarget(null)}
+                        onConfirm={(downtimeId) => cancelMutation.mutate(downtimeId)}
+                    />
+                )}
+                {extendTarget && (
+                    <ExtendDowntimeModal
+                        key={`extend-${extendTarget.match.downtime.id}`}
+                        target={extendTarget}
+                        nowMs={dataUpdatedAt}
+                        isPending={extendMutation.isPending}
+                        error={extendMutation.error ? friendlyError(extendMutation.error, 'extend downtimes') : null}
+                        onClose={() => setExtendTarget(null)}
+                        onConfirm={(downtimeId, newEndIso) => extendMutation.mutate({ downtimeId, newEndIso })}
+                    />
+                )}
+            </Suspense>
         </div>
     );
 }
