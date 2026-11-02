@@ -3,7 +3,14 @@ import { useEffect, useMemo, useState } from 'react';
 
 import { readCache, writeCache } from './cache';
 import type { CoverageRow } from './coverage';
-import { currentCorrections, relatedSlos, type CorrectionView, type RelatedSlo, type SloContext } from './slo';
+import {
+    currentCorrections,
+    relatedSlos,
+    type CorrectionView,
+    type RelatedSlo,
+    type SloContext,
+    type SloMatchMode,
+} from './slo';
 import { loadSloContext } from './slo.backend';
 
 export const SLO_QUERY_KEY = ['slo-context'] as const;
@@ -22,7 +29,7 @@ export interface CorrectionRow {
  * SLOs and SLO corrections, loaded in parallel with the monitor snapshot (and
  * cached per browser), related to the monitors in maintenance.
  */
-export function useSloData(rows: CoverageRow[], nowMs: number) {
+export function useSloData(rows: CoverageRow[], nowMs: number, matchMode: SloMatchMode = 'scope') {
     const [cached] = useState(() => readCache<SloContext>('slo-context', CACHE_MAX_AGE_MS));
     const query = useQuery({
         queryKey: SLO_QUERY_KEY,
@@ -42,11 +49,11 @@ export function useSloData(rows: CoverageRow[], nowMs: number) {
         const map = new Map<number, RelatedSlo[]>();
         if (!context) return map;
         rows.forEach((row) => {
-            const related = relatedSlos(row, context.slos);
+            const related = relatedSlos(row, context.slos, matchMode);
             if (related.length > 0) map.set(row.monitor.id, related);
         });
         return map;
-    }, [rows, context]);
+    }, [rows, context, matchMode]);
 
     // SLO id → its current (active, scheduled, recurring) corrections.
     const correctionsBySlo = useMemo(() => {
@@ -65,6 +72,7 @@ export function useSloData(rows: CoverageRow[], nowMs: number) {
     }, [context, relatedByMonitor, nowMs]);
 
     return {
+        context,
         isLoading: query.isLoading,
         error: query.error,
         relatedByMonitor,

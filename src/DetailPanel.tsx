@@ -13,6 +13,7 @@ import { MessageBox } from '@datadog/druids/misc/MessageBox';
 import { StatusPill } from '@datadog/druids/pills/StatusPill';
 import { Text } from '@datadog/druids/typography/Text';
 
+import { lastChange } from './changeRecord';
 import { windowStateOf, type CoverageRow, type DatadogDowntimeMatch, type DowntimeMatch } from './coverage';
 import {
     cancelBlockedReason,
@@ -31,6 +32,7 @@ import {
     monitorStateLevel,
     monitorUrl,
     mutedScopeLabel,
+    sloTypeLabel,
     sloUrl,
     windowDetail,
     windowLevel,
@@ -126,7 +128,8 @@ function RelatedSlosSection({
     if (relatedSlos.length === 0) {
         return (
             <Text variant="tertiary">
-                No SLO uses this monitor or shares the tags of the downtime that covers it.
+                No monitor-based SLO uses this monitor, and no count-based or time-slice SLO carries the scope or tags
+                of the downtime that covers it.
             </Text>
         );
     }
@@ -143,7 +146,7 @@ function RelatedSlosSection({
                             </StatusPill>
                         </div>
                         <Text as="div" size="xs" variant="tertiary">
-                            {slo.type} SLO · SLI {formatPercent(slo.sli)}
+                            {sloTypeLabel(slo.type)} SLO · SLI {formatPercent(slo.sli)}
                             {slo.target !== null ? ` (target ${slo.target}%)` : ''} · error budget{' '}
                             {formatPercent(slo.errorBudgetRemaining, 1)}
                             {slo.timeframe ? ` · ${slo.timeframe}` : ''}
@@ -242,6 +245,8 @@ export function DetailPanel({
 
     const columns = density === 'narrow' ? 1 : 2;
     const raw = detailQuery.data;
+    // The app's own record of who last extended or cancelled this downtime (Audit Trail shows the app's account).
+    const change = lastChange(raw?.message ?? match?.downtime.message);
 
     return (
         <SidePanel
@@ -406,6 +411,17 @@ export function DetailPanel({
                             <Field label="Created by">
                                 <Text>{match.creatorLabel}</Text>
                             </Field>
+                            {change && (
+                                <Field label="Last changed by">
+                                    <Text as="div">{change.by}</Text>
+                                    <Text as="div" size="xs" variant="tertiary">
+                                        {change.action === 'Extended'
+                                            ? `Extended${change.end ? ` to ${formatEnd(Date.parse(change.end))}` : ''}`
+                                            : 'Cancelled'}{' '}
+                                        via Downtime Manager, {formatStart(Date.parse(change.at))}
+                                    </Text>
+                                </Field>
+                            )}
                             <GridItem colSpan="all">
                                 <Text as="div" size="xs" variant="tertiary" weight="bold" textTransform="uppercase" marginBottom="xxs">
                                     Scope

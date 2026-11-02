@@ -339,6 +339,12 @@ export function friendlyError(
     permission = '"Monitors Downtime" (monitors_downtime)',
 ): string {
     const message = rawErrorMessage(error);
+    // Partial failures from the backend ("<what already happened>. Reason: <error>"):
+    // keep the context and make the reason friendly.
+    const partial = /^([\s\S]+?)\. Reason: ([\s\S]+)$/.exec(message);
+    if (partial) {
+        return `${partial[1]}. ${friendlyError(new Error(partial[2]), action, permission)}`;
+    }
     if (/\b403\b|forbidden|not authorized|permission/i.test(message)) {
         // Published Datadog apps run as their author (the account whose keys deployed them),
         // not as the viewer, so the fix is on that account.
@@ -354,6 +360,14 @@ export function friendlyError(
         return 'This downtime no longer exists. Refresh to see the current state.';
     }
     return message;
+}
+
+/** Human name for an SLO type from the API (`monitor`, `metric`, `time_slice`). */
+export function sloTypeLabel(type: string): string {
+    if (type === 'monitor') return 'Monitor-based';
+    if (type === 'metric') return 'Count-based';
+    if (type === 'time_slice') return 'Time-slice';
+    return type;
 }
 
 /** Link to an SLO in the org the app runs in. */

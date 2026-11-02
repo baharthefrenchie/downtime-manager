@@ -2,25 +2,139 @@ import { useState, type ReactNode } from 'react';
 
 import { Modal } from '@datadog/druids/dialogs/Modal';
 import { Button } from '@datadog/druids/form/Button';
+import { Checkbox } from '@datadog/druids/form/Checkbox';
 import { MessageBox } from '@datadog/druids/misc/MessageBox';
 import { Text } from '@datadog/druids/typography/Text';
 
 import type { CoverageRow, DowntimeMatch } from './coverage';
 import { extendBlockedReason, formatEnd, formatRelative, formatStart } from './format';
+import {
+    linkedBlockedReason,
+    linkedCorrectionLabel,
+    selectedCorrectionIds,
+    type LinkedCorrectionsState,
+} from './linkedCorrections';
 import { correctionExtendBlockedReason, type CorrectionView } from './slo';
 
+interface LinkedCorrectionsListProps {
+    state: LinkedCorrectionsState;
+    mode: 'extend' | 'cancel';
+    /** The downtime's new end (extend only). */
+    newEndMs: number;
+    unticked: Set<string>;
+    onToggle: (correctionId: string, isTicked: boolean) => void;
+}
+
+/** "Also update these SLO corrections" checklist in the downtime extend and cancel dialogs. */
+function LinkedCorrectionsList({ state, mode, newEndMs, unticked, onToggle }: LinkedCorrectionsListProps) {
+    const heading = (
+        <Text as="div" size="sm" weight="bold" marginTop="md" marginBottom="xxs">
+            Linked SLO corrections
+        </Text>
+    );
+    const scopeNote = (
+        <Text as="p" size="xs" variant="tertiary" marginBottom="xs">
+            One-time corrections that start within 5 minutes of this downtime and target its related SLOs, or that
+            Datadog created from its monitor tags. Recurring corrections are never changed here; edit them in
+            Datadog.
+        </Text>
+    );
+    if (state.status === 'loading') {
+        return (
+            <>
+                {heading}
+                <Text variant="tertiary" size="sm">Loading SLO corrections…</Text>
+            </>
+        );
+    }
+    if (state.status === 'error') {
+        return (
+            <>
+                {heading}
+                <MessageBox level="warning">
+                    Couldn&apos;t load SLO corrections, so only the downtime will change. {state.message}
+                </MessageBox>
+            </>
+        );
+    }
+    const { linked, recurring } = state.corrections;
+    return (
+        <>
+            {heading}
+            {scopeNote}
+            {linked.length === 0 ? (
+                <Text as="p" size="sm" variant="secondary">
+                    No linked one-time SLO correction. Only the downtime will change.
+                </Text>
+            ) : (
+                <div className="linked-corrections">
+                    {linked.map((item) => {
+                        const id = item.view.correction.id;
+                        const blocked = linkedBlockedReason(item, mode, newEndMs);
+                        const action =
+                            mode === 'extend'
+                                ? `Extend to ${formatEnd(newEndMs)}`
+                                : item.view.state === 'Scheduled'
+                                  ? "Delete (it hasn't started)"
+                                  : 'End now';
+                        return (
+                            <Checkbox
+                                key={id}
+                                isChecked={!blocked && !unticked.has(id)}
+                                isDisabled={Boolean(blocked)}
+                                onChange={(event) => onToggle(id, event.target.checked)}
+                                label={
+                                    <span className="cell-stack">
+                                        <Text size="sm">{linkedCorrectionLabel(item)}</Text>
+                                        <Text size="xs" variant="tertiary">
+                                            {item.reason === 'from-downtime' ? 'Created from this downtime\'s tags · ' : ''}
+                                            {item.view.state} · {formatStart(item.view.startMs)} → {formatEnd(item.view.endMs)} ·{' '}
+                                            {blocked ?? action}
+                                        </Text>
+                                    </span>
+                                }
+                            />
+                        );
+                    })}
+                </div>
+            )}
+            {recurring.length > 0 && (
+                <Text as="p" size="xs" variant="tertiary" marginTop="xs">
+                    {recurring.length} recurring correction{recurring.length === 1 ? '' : 's'} on these SLOs{' '}
+                    {recurring.length === 1 ? "isn't" : "aren't"} changed.
+                </Text>
+            )}
+            <Text as="p" size="xs" variant="tertiary" marginTop="xs">
+                The downtime changes first, then each ticked correction. If a correction fails, the downtime change is
+                kept and the result lists what failed.
+            </Text>
+        </>
+    );
+}
+
+function useUnticked() {
+    const [unticked, setUnticked] = useState<Set<string>>(() => new Set());
+    const toggle = (id: string, isTicked: boolean) =>
+        setUnticked((previous) => {
+            const next = new Set(previous);
+            if (isTicked) next.delete(id);
+            else next.add(id);
+            return next;
+        });
+    return [unticked, toggle] as const;
+}
+
 interface CancelModalProps {
-    target: { row: CoverageRow; match: DowntimeMatch } | null;
+    target: { row: CoverageRow; match: DowntimeMatch };
+    linked: LinkedCorrectionsState;
     isPending: boolean;
     error: string | null;
     onClose: () => void;
-    onConfirm: (downtimeId: string) => void;
+    onConfirm: (downtimeId: string, correctionIds: string[]) => void;
 }
 
-export function CancelDowntimeModal({ target, isPending, error, onClose, onConfirm }: CancelModalProps) {
-    if (!target) {
-        return null;
-    }
+export function CancelDowntimeModal({ target, linked, isPending, error, onClose, onConfirm }: CancelModalProps) {
+    const [unticked, toggle] = useUnticked();
     const { row, match } = target;
     const otherMonitorsNote =
         match.kind === 'direct'
@@ -42,7 +156,7 @@ export function CancelDowntimeModal({ target, isPending, error, onClose, onConfi
                         isPrimary
                         label="Cancel downtime"
                         isLoading={isPending}
-                        onClick={() => onConfirm(match.downtime.id)}
+                        onClick={() => onConfirm(match.downtime.id, selectedCorrectionIds(linked, unticked, 'cancel', 0))}
                     />
                 </div>
             }
@@ -65,8 +179,9 @@ export function CancelDowntimeModal({ target, isPending, error, onClose, onConfi
                     {row.matches.length - 1} other active downtime(s) also cover this monitor and will remain in effect.
                 </Text>
             )}
+            <LinkedCorrectionsList state={linked} mode="cancel" newEndMs={0} unticked={unticked} onToggle={toggle} />
             {error && (
-                <MessageBox level="danger" title="Cancel failed">
+                <MessageBox level="danger" title="Cancel failed" marginTop="sm">
                     {error}
                 </MessageBox>
             )}
@@ -102,6 +217,8 @@ interface ExtendEndModalProps {
     error: string | null;
     onClose: () => void;
     onConfirm: (newEndIso: string) => void;
+    /** Shown under the new end, for example the linked SLO corrections. */
+    renderExtra?: (newEndMs: number) => ReactNode;
 }
 
 /** Shared "move the end later" dialog for downtimes and SLO corrections. */
@@ -117,6 +234,7 @@ export function ExtendEndModal({
     error,
     onClose,
     onConfirm,
+    renderExtra,
 }: ExtendEndModalProps) {
     const baseMs = currentEndMs ?? nowMs;
     const [newEndMs, setNewEndMs] = useState<number>(baseMs + EXTEND_PRESETS[0].ms);
@@ -178,6 +296,7 @@ export function ExtendEndModal({
                             ? `New end: ${formatEnd(newEndMs)} (${formatRelative(newEndMs, nowMs)}). ${unchangedNote}`
                             : 'Pick an end time later than the current end.'}
                     </MessageBox>
+                    {renderExtra?.(newEndMs)}
                 </>
             )}
             {error && (
@@ -190,18 +309,17 @@ export function ExtendEndModal({
 }
 
 interface ExtendModalProps {
-    target: { row: CoverageRow; match: DowntimeMatch } | null;
+    target: { row: CoverageRow; match: DowntimeMatch };
+    linked: LinkedCorrectionsState;
     nowMs: number;
     isPending: boolean;
     error: string | null;
     onClose: () => void;
-    onConfirm: (downtimeId: string, newEndIso: string) => void;
+    onConfirm: (downtimeId: string, newEndIso: string, correctionIds: string[]) => void;
 }
 
-export function ExtendDowntimeModal({ target, nowMs, isPending, error, onClose, onConfirm }: ExtendModalProps) {
-    if (!target) {
-        return null;
-    }
+export function ExtendDowntimeModal({ target, linked, nowMs, isPending, error, onClose, onConfirm }: ExtendModalProps) {
+    const [unticked, toggle] = useUnticked();
     const { row, match } = target;
     return (
         <ExtendEndModal
@@ -222,7 +340,12 @@ export function ExtendDowntimeModal({ target, nowMs, isPending, error, onClose, 
             isPending={isPending}
             error={error}
             onClose={onClose}
-            onConfirm={(newEndIso) => onConfirm(match.downtime.id, newEndIso)}
+            onConfirm={(newEndIso) =>
+                onConfirm(match.downtime.id, newEndIso, selectedCorrectionIds(linked, unticked, 'extend', Date.parse(newEndIso)))
+            }
+            renderExtra={(newEndMs) => (
+                <LinkedCorrectionsList state={linked} mode="extend" newEndMs={newEndMs} unticked={unticked} onToggle={toggle} />
+            )}
         />
     );
 }

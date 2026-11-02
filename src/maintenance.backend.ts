@@ -18,7 +18,8 @@ import {
     type LiveSnapshot,
     type UserSummary,
 } from './coverage';
-import { toArray, withRateLimitRetry } from './backendUtils';
+import { initiatingActor, toArray, withRateLimitRetry } from './backendUtils';
+import { appendChangeLine, actorLabel, changeLine } from './changeRecord';
 import { extensionSchedule } from './schedule';
 
 const DOWNTIME_ID_PATTERN = /^[A-Za-z0-9-]{1,64}$/;
@@ -230,8 +231,11 @@ export async function fetchDowntimeDetail(downtimeId: string): Promise<EnrichedD
 /**
  * Cancels a downtime only after re-reading it live and confirming it is still
  * active, so a stale table row can't cancel an already-ended downtime.
+ *
+ * A canceled downtime can't be edited, so the "Cancelled by …" line is first
+ * appended to its message, then the downtime is canceled.
  */
-export async function cancelActiveDowntime(downtimeId: string): Promise<{ canceledId: string }> {
+export async function cancelActiveDowntime(downtimeId: string): Promise<{ canceledId: string; changedBy: string }> {
     const id = assertDowntimeId(downtimeId);
     const current = await getDowntimeV2({ inputs: { downtime_id: id } });
     if (current.status !== 'active') {
@@ -239,8 +243,19 @@ export async function cancelActiveDowntime(downtimeId: string): Promise<{ cancel
             `Downtime ${id} is no longer active (status: ${current.status ?? 'unknown'}).`,
         );
     }
-    await cancelDowntimeV2({ inputs: { downtime_id: id } });
-    return { canceledId: id };
+    const actor = await initiatingActor();
+    const line = changeLine('Cancelled', actor, new Date().toISOString(), { avoidMentions: true });
+    await updateDowntime({ inputs: { downtime_id: id, id, message: appendChangeLine(current.message, line) } });
+    try {
+        await cancelDowntimeV2({ inputs: { downtime_id: id } });
+    } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new Error(
+            `The downtime message now records the cancellation, but canceling downtime ${id} failed, so it is still active. Reason: ${reason}`,
+            { cause: error },
+        );
+    }
+    return { canceledId: id, changedBy: actorLabel(actor) };
 }
 
 
@@ -254,7 +269,7 @@ const MAX_EXTENSION_MS = 365 * 24 * 60 * 60 * 1000;
 export async function extendActiveDowntime(
     downtimeId: string,
     newEndIso: string,
-): Promise<{ downtimeId: string; end: string }> {
+): Promise<{ downtimeId: string; end: string; changedBy: string }> {
     const id = assertDowntimeId(downtimeId);
     const newEndMs = typeof newEndIso === 'string' ? Date.parse(newEndIso) : NaN;
     const nowMs = Date.now();
@@ -285,9 +300,11 @@ export async function extendActiveDowntime(
     }
 
     const end = new Date(newEndMs).toISOString();
+    const actor = await initiatingActor();
+    const message = appendChangeLine(current.message, changeLine('Extended', actor, new Date().toISOString(), { end, avoidMentions: true }));
     // Resend the current start unchanged: without it Datadog treats the update as "start now".
-    await updateDowntime({ inputs: { downtime_id: id, id, schedule: extensionSchedule(schedule?.start, end) } });
-    return { downtimeId: id, end };
+    await updateDowntime({ inputs: { downtime_id: id, id, message, schedule: extensionSchedule(schedule?.start, end) } });
+    return { downtimeId: id, end, changedBy: actorLabel(actor) };
 }
 
 

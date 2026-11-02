@@ -7,7 +7,8 @@ import {
     type SearchServiceLevelObjective,
 } from '@datadog/action-catalog/dd/slo';
 
-import { toArray, withRateLimitRetry } from './backendUtils';
+import { initiatingActor, toArray, withRateLimitRetry } from './backendUtils';
+import { actorLabel, appendChangeLine, changeLine } from './changeRecord';
 import type { SloContext, SloCorrectionSummary, SloSummary } from './slo';
 
 const SLO_PAGE_SIZE = 100;
@@ -150,7 +151,7 @@ async function readOneTimeCorrection(id: string) {
     if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
         throw new Error("Couldn't read this correction's start and end times.");
     }
-    return { startMs, endMs };
+    return { startMs, endMs, description: typeof attributes.description === 'string' ? attributes.description : null };
 }
 
 /**
@@ -160,7 +161,7 @@ async function readOneTimeCorrection(id: string) {
 export async function extendSloCorrection(
     correctionId: string,
     newEndIso: string,
-): Promise<{ correctionId: string; end: string }> {
+): Promise<{ correctionId: string; end: string; changedBy: string }> {
     const id = assertCorrectionId(correctionId);
     const newEndMs = typeof newEndIso === 'string' ? Date.parse(newEndIso) : NaN;
     const nowMs = Date.now();
@@ -168,15 +169,20 @@ export async function extendSloCorrection(
     if (newEndMs <= nowMs + 60_000) throw new Error('The new end time must be at least one minute in the future.');
     if (newEndMs > nowMs + MAX_EXTENSION_MS) throw new Error('The new end time must be within one year from now.');
 
-    const { startMs, endMs } = await readOneTimeCorrection(id);
+    const { startMs, endMs, description } = await readOneTimeCorrection(id);
     if (endMs <= nowMs) throw new Error('This correction has already ended.');
     if (newEndMs <= endMs) throw new Error('The new end time must be later than the current end time.');
 
     const end = new Date(newEndMs).toISOString();
+    const actor = await initiatingActor();
     await updateSLOCorrection({
-        inputs: { slo_correction_id: id, timeframe: { from: new Date(startMs).toISOString(), to: end } },
+        inputs: {
+            slo_correction_id: id,
+            description: appendChangeLine(description, changeLine('Extended', actor, new Date(nowMs).toISOString(), { end })),
+            timeframe: { from: new Date(startMs).toISOString(), to: end },
+        },
     });
-    return { correctionId: id, end };
+    return { correctionId: id, end, changedBy: actorLabel(actor) };
 }
 
 /**
@@ -186,17 +192,24 @@ export async function extendSloCorrection(
  */
 export async function cancelSloCorrection(
     correctionId: string,
-): Promise<{ correctionId: string; action: 'ended' | 'deleted' }> {
+): Promise<{ correctionId: string; action: 'ended' | 'deleted'; changedBy: string }> {
     const id = assertCorrectionId(correctionId);
     const nowMs = Date.now();
-    const { startMs, endMs } = await readOneTimeCorrection(id);
+    const { startMs, endMs, description } = await readOneTimeCorrection(id);
     if (endMs <= nowMs) throw new Error('This correction has already ended.');
+    const actor = await initiatingActor();
     if (startMs > nowMs) {
+        // Deleted outright: there is no description left to record the change in.
         await deleteSLOCorrection({ inputs: { slo_correction_id: id } });
-        return { correctionId: id, action: 'deleted' };
+        return { correctionId: id, action: 'deleted', changedBy: actorLabel(actor) };
     }
+    const nowIso = new Date(nowMs).toISOString();
     await updateSLOCorrection({
-        inputs: { slo_correction_id: id, timeframe: { from: new Date(startMs).toISOString(), to: new Date(nowMs).toISOString() } },
+        inputs: {
+            slo_correction_id: id,
+            description: appendChangeLine(description, changeLine('Cancelled', actor, nowIso)),
+            timeframe: { from: new Date(startMs).toISOString(), to: nowIso },
+        },
     });
-    return { correctionId: id, action: 'ended' };
+    return { correctionId: id, action: 'ended', changedBy: actorLabel(actor) };
 }

@@ -2,6 +2,9 @@
  * Shared types plus the pure matching logic that turns live monitors and
  * downtimes into monitor-centric coverage rows.
  */
+import { evaluateScope, parseScope, positiveTerms, tagMatches } from './scope.ts';
+
+export { evaluateScope, parseScope, positiveTerms, tagMatches, type ScopeExpr } from './scope.ts';
 
 export interface LiveMonitor {
     id: number;
@@ -149,39 +152,27 @@ export function isActiveDowntime(downtime: LiveDowntime, nowMs: number): boolean
     return true;
 }
 
-function globToRegExp(pattern: string): RegExp {
-    const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
-    return new RegExp(`^${escaped}$`, 'i');
-}
-
-export function tagMatches(pattern: string, monitorTags: string[]): boolean {
-    const regex = globToRegExp(pattern.trim());
-    return monitorTags.some((tag) => regex.test(tag.trim()));
-}
-
 function isWildcardOnly(tags: string[]): boolean {
     return tags.length === 0 || tags.every((tag) => tag.trim() === '*');
 }
 
 /** Positive tag terms in a downtime scope such as `env:prod AND (service:api OR service:web)`. */
 export function positiveScopeTerms(scope: string | null): string[] {
-    if (!scope) {
-        return [];
-    }
-    return scope
-        .replace(/[()]/g, ' ')
-        .split(/\s+(?:AND|OR)\s+|,/i)
-        .map((term) => term.trim())
-        .filter((term) => term && term !== '*' && !/^(NOT\s+|-|!)/i.test(term));
+    return positiveTerms(parseScope(scope));
 }
 
+/**
+ * True when the scope selects every group: `*`, empty, or only exclusions
+ * (such as `-host:a`), which Datadog treats as every group but those.
+ */
 function isAllGroupsScope(scope: string | null): boolean {
-    return !scope || scope.trim() === '*' || positiveScopeTerms(scope).length === 0;
+    return positiveScopeTerms(scope).length === 0;
 }
 
+/** True when the monitor's own tags satisfy the scope, so every group of the monitor is in scope. */
 function scopeSatisfiedByMonitorTags(scope: string | null, monitorTags: string[]): boolean {
-    const terms = positiveScopeTerms(scope);
-    return terms.length > 0 && terms.every((term) => tagMatches(term, monitorTags));
+    const expr = parseScope(scope);
+    return positiveTerms(expr).length > 0 && evaluateScope(expr, monitorTags);
 }
 
 export function userLabel(user: UserSummary | undefined, fallbackId: string | null): string {

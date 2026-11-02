@@ -20,6 +20,21 @@ active downtimes, using live data from the Datadog org it runs in.
   with relative times. Open-ended downtimes show *Indefinitely*.
 - **Actions:** inspect (side panel with raw get-downtime JSON), **extend** and **cancel**. Both
   re-read the downtime live and refuse if it is no longer active.
+- **Downtime and its SLO corrections together:** the extend and cancel dialogs list the SLO
+  corrections linked to the downtime, all ticked by default. A correction is linked when it is
+  one-time, hasn't ended, starts within 5 minutes of the downtime's start, and either targets one
+  of the downtime's related SLOs (by SLO or by tag query), or is the tag-based correction Datadog
+  creates from the downtime editor (**Preview SLO Correction**), whose query is the downtime's
+  monitor tags. Extending moves each ticked correction to the
+  same new end; canceling ends an active correction now, or deletes one that hasn't started. The
+  downtime changes first, then each correction; the result lists what succeeded and what failed,
+  and a failed correction never rolls back the downtime change. Recurring corrections are never
+  changed here (the dialog says how many there are); edit them in Datadog.
+- **Who changed it:** extending or canceling a downtime or SLO correction appends a line to its
+  message or description, keeping the existing text, for example
+  `Extended to 2026-11-02T18:00:00.000Z by Ada Lovelace (ada@example.com) via Downtime Manager at 2026-11-02T12:00:00.000Z`.
+  The detail panel shows the latest one as **Last changed by**. See
+  [Who changed what](#who-changed-what).
 - **Search:** a Datadog-style search bar. Free text matches monitor names (or an ID), and `key:value`
   matches monitor tags, with `*` wildcards, `-` or `NOT` to exclude, and `OR` between terms (AND is
   the default). Reserved keys: `id`, `name`, `type`, `status`, `owner`, `creator`, `scope`,
@@ -27,9 +42,22 @@ active downtimes, using live data from the Datadog org it runs in.
   are suggested as you type.
 - **Filters:** maintenance state, window, owner/creator, and downtime start date. Filters live in the
   URL, so filtered views are shareable. Export the filtered rows to CSV or JSON.
-- **Related SLOs:** for each monitor in maintenance, the SLOs it affects. These are monitor-based
-  SLOs that use the monitor and, when coverage is tag/scope-based, SLOs carrying every tag and scope
-  term of the downtime. Each shows its SLI, error budget and current corrections.
+- **Related SLOs:** for each monitor in maintenance, the SLOs it affects, each with its SLI, error
+  budget and current corrections. How an SLO is related depends on its type:
+  - **Monitor-based SLOs** are computed from their own monitors, so they are related only when they
+    use a monitor the downtime mutes, whatever the downtime type. One built on other monitors isn't
+    affected, even when its tags match.
+  - **Count-based (metric) and time-slice SLOs** have no monitors, so they are related by tags: an
+    SLO is related when it carries the downtime's **group scope**. A downtime on monitor tags
+    `env:prod` with scope `project:gen2` relates every such SLO tagged `project:gen2`, whether or
+    not it's tagged `env:prod`. `OR` scopes relate SLOs carrying either side, and excluded terms
+    (`-project:x`, `NOT project:x`) are never required. When the scope is `*` (or only exclusions),
+    the downtime's monitor tags are used instead. A downtime on a monitor ID relates them through
+    its group scope too, as long as the scope names more than an environment (`env:dev` alone
+    relates nothing); without a scope it relates none.
+  - **Strict SLO matching** (toggle in the SLO corrections view, or `?slomatch=strict` in the URL)
+    restores the narrower rule for count-based and time-slice SLOs: the SLO must carry every
+    monitor tag and every scope term.
 - **SLO corrections:** a view listing the active, scheduled and recurring corrections on those SLOs
   (including corrections that target SLOs by tag query), with how long they run and how long is
   left. One-time corrections can be **extended** (start kept, end moved) or **canceled**. Canceling
@@ -54,10 +82,30 @@ needs:
 - **Monitors Downtime** (`monitors_downtime`): cancel and extend downtimes.
 - **User Access Read**: show downtime creators' names.
 - **SLOs Read**: list SLOs and their corrections.
-- **SLOs Corrections** (`slos_corrections`): extend and cancel SLO corrections.
+- **SLOs Corrections** (`slos_corrections`): extend and cancel SLO corrections, including the ones
+  changed together with a downtime. Without it, the downtime still changes and each correction is
+  reported as refused with this permission named.
 
 A service account with exactly these permissions is the safest owner for the deploy key. Who can
 open the app is controlled separately, in the app's permissions in App Builder.
+
+### Who changed what
+
+Because the app runs as its author, Datadog's Audit Trail attributes every extend and cancel to
+that account (the deploy account), not to the person who clicked. The app therefore keeps its own
+record: each extend or cancel appends a `… by <name> (<email>) via Downtime Manager at <time>` line
+to the downtime message or SLO correction description.
+
+- The identity comes from the Datadog Apps runtime on the backend
+  (`getInitiatingUser()` from `@datadog/apps-backend/user`), not from the browser, so a viewer
+  can't change it. It is validated and length-limited before it is written.
+- Downtime messages support @-notifications, so the email's `@` is written as a lookalike
+  character (`＠`) and the line never notifies anyone.
+- A canceled downtime can't be edited, so the line is written first and the downtime is canceled
+  next. If that cancel fails, the error says the message was already updated.
+- A scheduled SLO correction that is canceled is deleted, so there is nothing left to record on.
+- This is a convenience record, not an audit log: anyone who can edit the downtime in Datadog can
+  edit or remove the line.
 
 ## Development
 

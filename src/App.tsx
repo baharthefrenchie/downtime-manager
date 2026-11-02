@@ -51,6 +51,8 @@ import {
 import { useDensity, useUrlFilters, type Density } from './hooks';
 import { useCreatorNames } from './useCreatorNames';
 import type { CorrectionTarget } from './DowntimeModals';
+import { linkedCorrectionLabel, type LinkedCorrectionsState } from './linkedCorrections';
+import { downtimeRelatedSlos, linkedCorrections } from './slo';
 import { cancelSloCorrection, extendSloCorrection } from './slo.backend';
 import { SearchBar } from './SearchBar';
 import { parseQuery, rowMatchesQuery, rowMatchesTemplateVariables, templateVariableFilters } from './search';
@@ -89,7 +91,15 @@ type Option<T extends string> = { label: string; value: T };
 type MaintenanceFilter = 'all' | MaintenanceState;
 type WindowFilter = 'all' | WindowState;
 type ActionTarget = { row: CoverageRow; match: DowntimeMatch };
-type Toast = { level: 'success' | 'danger'; title: string; message: string };
+type Toast = {
+    level: 'success' | 'warning' | 'danger';
+    title: string;
+    message: string;
+    /** Per-item results, for example each linked SLO correction. */
+    details?: string[];
+};
+/** What happened to one linked SLO correction after its downtime changed. */
+type CorrectionOutcome = { label: string; ok: boolean; detail: string };
 type Cell = { row: { original: CoverageRow } };
 
 const MAINTENANCE_OPTIONS: Option<MaintenanceFilter>[] = [
@@ -181,7 +191,7 @@ function App() {
     );
 
     // SLOs related to these monitors and their corrections (loaded in parallel, cached).
-    const sloData = useSloData(rows, dataUpdatedAt);
+    const sloData = useSloData(rows, dataUpdatedAt, filters.strictSloMatch ? 'strict' : 'scope');
     const { relatedByMonitor, correctionsBySlo } = sloData;
 
     // ---- Filters (mirrored into the URL for shareable links) ----
@@ -303,7 +313,8 @@ function App() {
 
     useEffect(() => {
         if (!toast) return undefined;
-        const timer = window.setTimeout(() => setToast(null), 6000);
+        // Results with per-item details (or failures) stay up longer.
+        const timer = window.setTimeout(() => setToast(null), toast.details?.length || toast.level !== 'success' ? 20000 : 6000);
         return () => window.clearTimeout(timer);
     }, [toast]);
 
@@ -313,28 +324,114 @@ function App() {
         await queryClient.invalidateQueries({ queryKey: ['datadog-matches'] });
     };
 
+    const [correctionExtendTarget, setCorrectionExtendTarget] = useState<CorrectionTarget | null>(null);
+    const [correctionCancelTarget, setCorrectionCancelTarget] = useState<CorrectionTarget | null>(null);
+    const refreshSlos = () => queryClient.invalidateQueries({ queryKey: SLO_QUERY_KEY });
+
+    // SLO corrections that change together with a downtime (one-time, starting with it, on its related SLOs).
+    const sloMatchMode = filters.strictSloMatch ? 'strict' : 'scope';
+    const linkedFor = useCallback(
+        (match: DowntimeMatch): LinkedCorrectionsState => {
+            if (sloData.context) {
+                const slos = downtimeRelatedSlos(match.downtime.id, rows, sloData.context.slos, sloMatchMode);
+                return {
+                    status: 'ready',
+                    corrections: linkedCorrections(
+                        { startMs: match.startMs, monitorTags: match.downtime.monitorTags },
+                        slos,
+                        sloData.context.slos,
+                        sloData.context.corrections,
+                        dataUpdatedAt,
+                    ),
+                };
+            }
+            if (sloData.error) {
+                return { status: 'error', message: friendlyError(sloData.error, 'read SLOs', '"SLOs Read" (slos_read)') };
+            }
+            return { status: 'loading' };
+        },
+        [sloData.context, sloData.error, rows, sloMatchMode, dataUpdatedAt],
+    );
+    const correctionLabels = (match: DowntimeMatch) => {
+        const state = linkedFor(match);
+        const labels = new Map<string, string>();
+        if (state.status === 'ready') {
+            state.corrections.linked.forEach((item) => labels.set(item.view.correction.id, linkedCorrectionLabel(item)));
+        }
+        return labels;
+    };
+
+    /** Runs each correction change in turn, after the downtime; one failing doesn't stop the others. */
+    const runCorrections = async (
+        correctionIds: string[],
+        labels: Map<string, string>,
+        change: (correctionId: string) => Promise<string>,
+    ): Promise<CorrectionOutcome[]> => {
+        const outcomes: CorrectionOutcome[] = [];
+        for (const correctionId of correctionIds) {
+            const label = labels.get(correctionId) ?? `SLO correction ${correctionId}`;
+            try {
+                outcomes.push({ label, ok: true, detail: await change(correctionId) });
+            } catch (error) {
+                outcomes.push({ label, ok: false, detail: friendlyError(error, 'edit SLO corrections', SLO_CORRECTIONS_PERMISSION) });
+            }
+        }
+        return outcomes;
+    };
+    const reportOutcomes = (title: string, message: string, outcomes: CorrectionOutcome[]) => {
+        const failed = outcomes.filter((o) => !o.ok).length;
+        setToast({
+            level: failed ? 'warning' : 'success',
+            title: failed ? `${title}; ${failed} of ${outcomes.length} SLO correction${outcomes.length === 1 ? '' : 's'} failed` : title,
+            message: failed ? `${message} The downtime change was kept.` : message,
+            details: outcomes.map((o) => `${o.ok ? '✓' : '✗'} ${o.label}: ${o.detail}`),
+        });
+    };
+
     const cancelMutation = useMutation({
-        mutationFn: (downtimeId: string) => cancelActiveDowntime(downtimeId),
-        onSuccess: async ({ canceledId }) => {
-            setToast({ level: 'success', title: 'Downtime canceled', message: `Downtime ${canceledId} was canceled.` });
+        mutationFn: async ({ match, correctionIds }: { match: DowntimeMatch; correctionIds: string[] }) => {
+            const labels = correctionLabels(match);
+            // The downtime first: if it fails, no correction is touched.
+            const result = await cancelActiveDowntime(match.downtime.id);
+            const outcomes = await runCorrections(correctionIds, labels, async (id) => {
+                const { action } = await cancelSloCorrection(id);
+                return action === 'deleted' ? "deleted (it hadn't started)" : 'ended now';
+            });
+            return { ...result, outcomes };
+        },
+        onSuccess: async ({ canceledId, changedBy, outcomes }) => {
+            reportOutcomes(
+                'Downtime canceled',
+                `Downtime ${canceledId} was canceled. Its message records it as cancelled by ${changedBy}.`,
+                outcomes,
+            );
             setCancelTarget(null);
             await refreshAfterChange(canceledId);
+            if (outcomes.length) await refreshSlos();
         },
         onError: (error) =>
             setToast({ level: 'danger', title: 'Cancel failed', message: friendlyError(error, 'cancel downtimes') }),
     });
 
     const extendMutation = useMutation({
-        mutationFn: ({ downtimeId, newEndIso }: { downtimeId: string; newEndIso: string }) =>
-            extendActiveDowntime(downtimeId, newEndIso),
-        onSuccess: async ({ downtimeId, end }) => {
-            setToast({
-                level: 'success',
-                title: 'Downtime extended',
-                message: `Downtime ${downtimeId} now ends ${formatEnd(Date.parse(end))}.`,
+        mutationFn: async ({ match, newEndIso, correctionIds }: { match: DowntimeMatch; newEndIso: string; correctionIds: string[] }) => {
+            const labels = correctionLabels(match);
+            const result = await extendActiveDowntime(match.downtime.id, newEndIso);
+            const outcomes = await runCorrections(correctionIds, labels, async (id) => {
+                const { end } = await extendSloCorrection(id, result.end);
+                return `extended to ${formatEnd(Date.parse(end))}`;
             });
+            return { ...result, outcomes };
+        },
+        onSuccess: async ({ downtimeId, end, changedBy, outcomes }) => {
+            reportOutcomes(
+                'Downtime extended',
+                `Downtime ${downtimeId} now ends ${formatEnd(Date.parse(end))}. Its message records it as extended by ${changedBy}.`,
+                outcomes,
+            );
             setExtendTarget(null);
             await refreshAfterChange(downtimeId);
+            if (outcomes.length) await refreshSlos();
         },
         onError: (error) =>
             setToast({ level: 'danger', title: 'Extend failed', message: friendlyError(error, 'extend downtimes') }),
@@ -358,9 +455,6 @@ function App() {
     );
 
     // ---- SLO corrections: extend / cancel ----
-    const [correctionExtendTarget, setCorrectionExtendTarget] = useState<CorrectionTarget | null>(null);
-    const [correctionCancelTarget, setCorrectionCancelTarget] = useState<CorrectionTarget | null>(null);
-    const refreshSlos = () => queryClient.invalidateQueries({ queryKey: SLO_QUERY_KEY });
 
     const extendCorrectionMutation = useMutation({
         mutationFn: ({ correctionId, newEndIso }: { correctionId: string; newEndIso: string }) =>
@@ -704,6 +798,13 @@ function App() {
                 <div className="toast" role="status" aria-live="polite">
                     <MessageBox level={toast.level} title={toast.title} isDismissible onDismiss={() => setToast(null)}>
                         {toast.message}
+                        {toast.details && toast.details.length > 0 && (
+                            <ul className="toast-details">
+                                {toast.details.map((line, index) => (
+                                    <li key={index}>{line}</li>
+                                ))}
+                            </ul>
+                        )}
                     </MessageBox>
                 </div>
             )}
@@ -921,6 +1022,14 @@ function App() {
                             value={filters.view}
                             onChange={(value) => setFilters({ view: value as 'monitors' | 'corrections' })}
                         />
+                        {filters.view === 'corrections' && (
+                            <Checkbox
+                                label={isNarrow ? 'Strict matching' : 'Strict SLO matching'}
+                                isChecked={filters.strictSloMatch}
+                                onChange={(event) => setFilters({ strictSloMatch: event.target.checked })}
+                                title="Off: an SLO is related when it carries the downtime's group scope (for example project:gen2). On: it must carry every monitor tag and every scope term of the downtime."
+                            />
+                        )}
                         {!isNarrow && filters.view === 'monitors' && (
                             <Text size="sm" variant="secondary">
                                 {filteredRows.length} of {rows.length} monitors
@@ -997,22 +1106,29 @@ function App() {
                 )}
                 {cancelTarget && (
                     <CancelDowntimeModal
+                        key={`cancel-${cancelTarget.match.downtime.id}`}
                         target={cancelTarget}
+                        linked={linkedFor(cancelTarget.match)}
                         isPending={cancelMutation.isPending}
                         error={cancelMutation.error ? friendlyError(cancelMutation.error, 'cancel downtimes') : null}
                         onClose={() => setCancelTarget(null)}
-                        onConfirm={(downtimeId) => cancelMutation.mutate(downtimeId)}
+                        onConfirm={(_downtimeId, correctionIds) =>
+                            cancelMutation.mutate({ match: cancelTarget.match, correctionIds })
+                        }
                     />
                 )}
                 {extendTarget && (
                     <ExtendDowntimeModal
                         key={`extend-${extendTarget.match.downtime.id}`}
                         target={extendTarget}
+                        linked={linkedFor(extendTarget.match)}
                         nowMs={dataUpdatedAt}
                         isPending={extendMutation.isPending}
                         error={extendMutation.error ? friendlyError(extendMutation.error, 'extend downtimes') : null}
                         onClose={() => setExtendTarget(null)}
-                        onConfirm={(downtimeId, newEndIso) => extendMutation.mutate({ downtimeId, newEndIso })}
+                        onConfirm={(_downtimeId, newEndIso, correctionIds) =>
+                            extendMutation.mutate({ match: extendTarget.match, newEndIso, correctionIds })
+                        }
                     />
                 )}
                 {correctionExtendTarget && (
