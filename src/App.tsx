@@ -315,8 +315,12 @@ function App() {
 
     const cancelMutation = useMutation({
         mutationFn: (downtimeId: string) => cancelActiveDowntime(downtimeId),
-        onSuccess: async ({ canceledId }) => {
-            setToast({ level: 'success', title: 'Downtime canceled', message: `Downtime ${canceledId} was canceled.` });
+        onSuccess: async ({ canceledId, changedBy }) => {
+            setToast({
+                level: 'success',
+                title: 'Downtime canceled',
+                message: `Downtime ${canceledId} was canceled. Its message records it as cancelled by ${changedBy}.`,
+            });
             setCancelTarget(null);
             await refreshAfterChange(canceledId);
         },
@@ -327,11 +331,11 @@ function App() {
     const extendMutation = useMutation({
         mutationFn: ({ downtimeId, newEndIso }: { downtimeId: string; newEndIso: string }) =>
             extendActiveDowntime(downtimeId, newEndIso),
-        onSuccess: async ({ downtimeId, end }) => {
+        onSuccess: async ({ downtimeId, end, changedBy }) => {
             setToast({
                 level: 'success',
                 title: 'Downtime extended',
-                message: `Downtime ${downtimeId} now ends ${formatEnd(Date.parse(end))}.`,
+                message: `Downtime ${downtimeId} now ends ${formatEnd(Date.parse(end))}. Its message records it as extended by ${changedBy}.`,
             });
             setExtendTarget(null);
             await refreshAfterChange(downtimeId);

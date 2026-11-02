@@ -339,6 +339,12 @@ export function friendlyError(
     permission = '"Monitors Downtime" (monitors_downtime)',
 ): string {
     const message = rawErrorMessage(error);
+    // Partial failures from the backend ("<what already happened>. Reason: <error>"):
+    // keep the context and make the reason friendly.
+    const partial = /^([\s\S]+?)\. Reason: ([\s\S]+)$/.exec(message);
+    if (partial) {
+        return `${partial[1]}. ${friendlyError(new Error(partial[2]), action, permission)}`;
+    }
     if (/\b403\b|forbidden|not authorized|permission/i.test(message)) {
         // Published Datadog apps run as their author (the account whose keys deployed them),
         // not as the viewer, so the fix is on that account.

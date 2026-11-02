@@ -1,6 +1,24 @@
 /**
  * Helpers shared by the backend functions (maintenance.backend.ts, slo.backend.ts).
  */
+import { getInitiatingUser } from '@datadog/apps-backend/user';
+
+import { sanitizeActor, type Actor } from './changeRecord';
+
+/**
+ * The person whose click started this backend call, as authenticated by the
+ * Datadog Apps runtime (not the app author the call runs as). Read on the
+ * backend rather than sent by the frontend, so it can't be forged. Validated
+ * and length-limited before it is written anywhere.
+ */
+export async function initiatingActor(): Promise<Actor> {
+    try {
+        const user = await getInitiatingUser();
+        return sanitizeActor({ name: user?.name, email: user?.email });
+    } catch {
+        return { name: null, email: null };
+    }
+}
 
 /**
  * Action outputs can arrive as array-like objects (`{"0": …, "1": …}`) after

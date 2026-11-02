@@ -20,6 +20,11 @@ active downtimes, using live data from the Datadog org it runs in.
   with relative times. Open-ended downtimes show *Indefinitely*.
 - **Actions:** inspect (side panel with raw get-downtime JSON), **extend** and **cancel**. Both
   re-read the downtime live and refuse if it is no longer active.
+- **Who changed it:** extending or canceling a downtime or SLO correction appends a line to its
+  message or description, keeping the existing text, for example
+  `Extended to 2026-11-02T18:00:00.000Z by Ada Lovelace (ada@example.com) via Downtime Manager at 2026-11-02T12:00:00.000Z`.
+  The detail panel shows the latest one as **Last changed by**. See
+  [Who changed what](#who-changed-what).
 - **Search:** a Datadog-style search bar. Free text matches monitor names (or an ID), and `key:value`
   matches monitor tags, with `*` wildcards, `-` or `NOT` to exclude, and `OR` between terms (AND is
   the default). Reserved keys: `id`, `name`, `type`, `status`, `owner`, `creator`, `scope`,
@@ -65,6 +70,24 @@ needs:
 
 A service account with exactly these permissions is the safest owner for the deploy key. Who can
 open the app is controlled separately, in the app's permissions in App Builder.
+
+### Who changed what
+
+Because the app runs as its author, Datadog's Audit Trail attributes every extend and cancel to
+that account (the deploy account), not to the person who clicked. The app therefore keeps its own
+record: each extend or cancel appends a `… by <name> (<email>) via Downtime Manager at <time>` line
+to the downtime message or SLO correction description.
+
+- The identity comes from the Datadog Apps runtime on the backend
+  (`getInitiatingUser()` from `@datadog/apps-backend/user`), not from the browser, so a viewer
+  can't change it. It is validated and length-limited before it is written.
+- Downtime messages support @-notifications, so the email's `@` is written as a lookalike
+  character (`＠`) and the line never notifies anyone.
+- A canceled downtime can't be edited, so the line is written first and the downtime is canceled
+  next. If that cancel fails, the error says the message was already updated.
+- A scheduled SLO correction that is canceled is deleted, so there is nothing left to record on.
+- This is a convenience record, not an audit log: anyone who can edit the downtime in Datadog can
+  edit or remove the line.
 
 ## Development
 

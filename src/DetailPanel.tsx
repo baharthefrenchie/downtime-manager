@@ -13,6 +13,7 @@ import { MessageBox } from '@datadog/druids/misc/MessageBox';
 import { StatusPill } from '@datadog/druids/pills/StatusPill';
 import { Text } from '@datadog/druids/typography/Text';
 
+import { lastChange } from './changeRecord';
 import { windowStateOf, type CoverageRow, type DatadogDowntimeMatch, type DowntimeMatch } from './coverage';
 import {
     cancelBlockedReason,
@@ -242,6 +243,8 @@ export function DetailPanel({
 
     const columns = density === 'narrow' ? 1 : 2;
     const raw = detailQuery.data;
+    // The app's own record of who last extended or cancelled this downtime (Audit Trail shows the app's account).
+    const change = lastChange(raw?.message ?? match?.downtime.message);
 
     return (
         <SidePanel
@@ -406,6 +409,17 @@ export function DetailPanel({
                             <Field label="Created by">
                                 <Text>{match.creatorLabel}</Text>
                             </Field>
+                            {change && (
+                                <Field label="Last changed by">
+                                    <Text as="div">{change.by}</Text>
+                                    <Text as="div" size="xs" variant="tertiary">
+                                        {change.action === 'Extended'
+                                            ? `Extended${change.end ? ` to ${formatEnd(Date.parse(change.end))}` : ''}`
+                                            : 'Cancelled'}{' '}
+                                        via Downtime Manager, {formatStart(Date.parse(change.at))}
+                                    </Text>
+                                </Field>
+                            )}
                             <GridItem colSpan="all">
                                 <Text as="div" size="xs" variant="tertiary" weight="bold" textTransform="uppercase" marginBottom="xxs">
                                     Scope

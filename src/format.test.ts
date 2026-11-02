@@ -37,3 +37,13 @@ describe('friendlyError', () => {
         assert.match(message, /author/i);
     });
 });
+
+describe('friendlyError with partial failures', () => {
+    it('keeps what already happened and makes the reason friendly', () => {
+        const message = friendlyError(
+            new Error('The downtime message now records the cancellation, but canceling downtime abc failed, so it is still active. Reason: 403 Forbidden'),
+            'cancel downtimes',
+        );
+        assert.match(message, /^The downtime message now records the cancellation, but canceling downtime abc failed, so it is still active\. Datadog denied permission to cancel downtimes/);
+    });
+});
