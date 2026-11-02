@@ -6,8 +6,9 @@ name: Datadog App
 #
 # Deploy targets are GitHub environments, one per Datadog org. Each holds that org's
 # DATADOG_API_KEY and DATADOG_APP_KEY secrets (repository secrets are used if the
-# environment has none) and, for orgs outside US1, a DATADOG_SITE variable such as
-# datadoghq.eu. List the environments in the repository variable DATADOG_DEPLOY_TARGETS,
+# environment has none) and, when needed, a DATADOG_SITE variable: the org's site
+# (datadoghq.eu) or its custom subdomain on that site (demo.datadoghq.com), so links in
+# the app open that org's own host. List the environments in the repository variable DATADOG_DEPLOY_TARGETS,
 # e.g. ["datadog-production", "datadog-eu"]. Without it, only datadog-production deploys.
 on:
   pull_request:
@@ -82,13 +83,31 @@ jobs:
         with:
           node-version: 24
 
+      # DATADOG_SITE may be an org subdomain (demo.datadoghq.com). The deploy gets the bare
+      # site (datadoghq.com); the app's links get the full value.
+      - name: Resolve site
+        id: site
+        env:
+          SITE: ${{ vars.DATADOG_SITE }}
+        run: |
+          full=$(printf '%s' "$SITE" | tr '[:upper:]' '[:lower:]' | sed -E 's#^https?://##; s#[/?#].*$##')
+          bare="$full"
+          for known in us3.datadoghq.com us5.datadoghq.com ap1.datadoghq.com ap2.datadoghq.com us2.ddog-gov.com datadoghq.com datadoghq.eu ddog-gov.com; do
+            if [ "$full" = "$known" ]; then bare="$known"; break; fi
+            case "$full" in *".$known") bare="$known"; break ;; esac
+          done
+          echo "Deploying to site '${bare:-from datadog-app.config.json}'; app links use '${full:-the site default}'."
+          echo "bare=$bare" >> "$GITHUB_OUTPUT"
+          echo "full=$full" >> "$GITHUB_OUTPUT"
+
       - name: Deploy
         uses: DataDog/apps-github-action@2c2495d48c9569b6eace166a5d43e60d9e5b81da # v0.1.1
         env:
-          # Also read by vite.config.ts, so in-app links fall back to the right site.
-          DD_SITE: ${{ vars.DATADOG_SITE }}
+          DD_SITE: ${{ steps.site.outputs.bare }}
+          # Read by vite.config.ts for in-app links (the CLI resets DD_SITE to the bare site).
+          APP_LINK_SITE: ${{ steps.site.outputs.full }}
         with:
           datadog-api-key: ${{ secrets.DATADOG_API_KEY }}
           datadog-app-key: ${{ secrets.DATADOG_APP_KEY }}
-          datadog-site: ${{ vars.DATADOG_SITE }}
+          datadog-site: ${{ steps.site.outputs.bare }}
           app-directory: .

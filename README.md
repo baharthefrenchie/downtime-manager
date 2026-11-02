@@ -150,20 +150,26 @@ Each org is a GitHub environment (**Settings → Environments**) holding that or
 1. Create an environment, for example `datadog-eu`.
 2. Add `DATADOG_API_KEY` and `DATADOG_APP_KEY` environment secrets, created in that org. The
    application key needs the **Actions API Access** and **Apps** scopes.
-3. For orgs outside US1, add an environment variable `DATADOG_SITE` (`datadoghq.eu`,
-   `us3.datadoghq.com`, `us5.datadoghq.com`, `ap1.datadoghq.com`, `ap2.datadoghq.com`, `ddog-gov.com`).
+3. Add an environment variable `DATADOG_SITE` when the org isn't on `app.datadoghq.com`:
+   - its site for orgs outside US1 (`datadoghq.eu`, `us3.datadoghq.com`, `us5.datadoghq.com`,
+     `ap1.datadoghq.com`, `ap2.datadoghq.com`, `ddog-gov.com`);
+   - its custom subdomain on that site when it has one, such as `demo.datadoghq.com` or
+     `acme.datadoghq.eu`. The app is deployed to the site, and its links open the org's own host.
+     Without it, links go to `app.<site>` unless the browser exposes the page the app is embedded in.
 4. Add the environment to the repository variable `DATADOG_DEPLOY_TARGETS`, a JSON list such as
    `["datadog-production", "datadog-eu"]`. Without this variable only `datadog-production`
    (which uses the repository secrets) deploys.
 
 Every push to `main` then deploys to each target. One org failing doesn't stop the others. To try
 a new org first, run the workflow manually (**Actions → Datadog App → Run workflow**) with that
-environment as `target`. Links inside the app point at the org it's embedded in, so they work in
-every org. The app keeps the same `id` everywhere; each org gets its own copy.
+environment as `target`. Each org's links come from its own `DATADOG_SITE`, so one org's
+subdomain never leaks into another's copy. The app keeps the same `id` everywhere; each org gets its own copy.
 
 To deploy manually instead: `npm run upload` publishes live immediately to the org you're logged
 into. Use `npx datadog-apps upload --org <org UUID>` or `--site <site>` to pick another org; run
-`npx datadog-apps auth status` to list them.
+`npx datadog-apps auth status` to list them. For an org with a custom subdomain, prefix the
+command with `APP_LINK_SITE=<subdomain>.<site>` (for example `demo.datadoghq.com`) so links open
+that host.
 
 > Never change `id` in `datadog-app.config.json`. It is the app's permanent identity, and changing
 > it makes the next upload create a duplicate app.

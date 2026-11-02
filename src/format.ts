@@ -39,21 +39,61 @@ function embeddingDatadogOrigin(): string | null {
     return candidates.find(isDatadogUiOrigin) ?? null;
 }
 
-/** Fallback when not embedded (local dev): the site the app was built for. */
-function siteBaseUrl(): string {
-    const site = (import.meta.env.VITE_DATADOG_SITE || 'datadoghq.com').replace(/^https?:\/\//, '').replace(/\/$/, '');
-    // datadoghq.com → app.datadoghq.com; us3.datadoghq.com stays as-is.
-    const host = site.split('.').length > 2 ? site : `app.${site}`;
-    return `https://${host}`;
+// Datadog sites. A site value with an org's subdomain in front of one of these
+// (demo.datadoghq.com, acme.datadoghq.eu) names that org's own host, as the Datadog
+// CLI and build plugin accept it.
+const DATADOG_SITES = [
+    'datadoghq.com',
+    'us3.datadoghq.com',
+    'us5.datadoghq.com',
+    'ap1.datadoghq.com',
+    'ap2.datadoghq.com',
+    'datadoghq.eu',
+    'ddog-gov.com',
+    'us2.ddog-gov.com',
+];
+
+export interface SiteUiOrigin {
+    origin: string;
+    /** True when the site value names an org's custom subdomain. */
+    isOrgSubdomain: boolean;
 }
 
 /**
- * Base URL for links into Datadog. Uses the org the app is embedded in, so links
- * stay in the right org whichever org or site the app is deployed to.
+ * Datadog UI origin for the site the app was built for (DATADOG_SITE per deploy
+ * target, or datadogSite in datadog-app.config.json): `datadoghq.com` →
+ * app.datadoghq.com, `us3.datadoghq.com` → itself, `demo.datadoghq.com` → the org's
+ * own host. Anything that isn't a Datadog site falls back to app.datadoghq.com.
+ */
+export function siteUiOrigin(site: string | undefined): SiteUiOrigin {
+    const host = (site || 'datadoghq.com')
+        .trim()
+        .toLowerCase()
+        .replace(/^https?:\/\//, '')
+        .replace(/[/?#].*$/, '');
+    if (DATADOG_SITES.includes(host)) {
+        // datadoghq.com → app.datadoghq.com; us3.datadoghq.com stays as-is.
+        return { origin: `https://${host.split('.').length > 2 ? host : `app.${host}`}`, isOrgSubdomain: false };
+    }
+    const base = DATADOG_SITES.filter((known) => host.endsWith(`.${known}`)).sort((a, b) => b.length - a.length)[0];
+    const label = base ? host.slice(0, -base.length - 1) : '';
+    if (base && /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(label)) {
+        return { origin: `https://${host}`, isOrgSubdomain: label !== 'app' };
+    }
+    return { origin: 'https://app.datadoghq.com', isOrgSubdomain: false };
+}
+
+/**
+ * Base URL for links into Datadog. A site with an org subdomain wins, since it's set
+ * on purpose for that org's deploy. Otherwise the Datadog page the app is embedded in
+ * when the browser exposes it, then the site's default host.
  */
 let baseUrl: string | null = null;
 function datadogBaseUrl(): string {
-    baseUrl ??= embeddingDatadogOrigin() ?? siteBaseUrl();
+    if (baseUrl === null) {
+        const site = siteUiOrigin(import.meta.env.VITE_DATADOG_SITE);
+        baseUrl = site.isOrgSubdomain ? site.origin : (embeddingDatadogOrigin() ?? site.origin);
+    }
     return baseUrl;
 }
 
