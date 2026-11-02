@@ -26,8 +26,19 @@ active downtimes, using live data from the Datadog org it runs in.
   URL, so filtered views are shareable. Export the filtered rows to CSV or JSON.
 - **Dashboard-friendly:** the layout adapts from full screen down to a small dashboard widget.
 
-Viewers need Datadog permission to read monitors and downtimes. Cancel and extend also require
-the **Monitors Downtime** (`monitors_downtime`) permission.
+## Permissions
+
+A published Datadog app runs as its **author** (the account that deployed it), not as the person
+viewing it ([App execution identity](https://docs.datadoghq.com/actions/app_builder/access_and_auth/#app-execution-identity)).
+When CI deploys, the author is the owner of the application key in `DATADOG_APP_KEY`. That account
+needs:
+
+- **Monitors Read**: list monitors and downtimes.
+- **Monitors Downtime** (`monitors_downtime`): cancel and extend downtimes.
+- **User Access Read**: show downtime creators' names.
+
+A service account with exactly these permissions is the safest owner for the deploy key. Who can
+open the app is controlled separately, in the app's permissions in App Builder.
 
 ## Development
 
@@ -62,10 +73,30 @@ The deploy job needs these repository secrets, created in the Datadog org the ap
 | `DATADOG_API_KEY` | A Datadog API key |
 | `DATADOG_APP_KEY` | A Datadog application key with the **Actions API Access** and **Apps** scopes |
 
-The key's owner must have edit access to the app in App Builder. Deploys run in the
-`datadog-production` GitHub environment; add required reviewers there to gate releases.
+The key's owner must have edit access to the app in App Builder, and becomes the identity the app
+runs as (see [Permissions](#permissions)).
 
-To deploy manually instead: `npm run upload`. This publishes live immediately.
+### Deploying to more than one Datadog org
+
+Each org is a GitHub environment (**Settings → Environments**) holding that org's keys:
+
+1. Create an environment, for example `datadog-eu`.
+2. Add `DATADOG_API_KEY` and `DATADOG_APP_KEY` environment secrets, created in that org. The
+   application key needs the **Actions API Access** and **Apps** scopes.
+3. For orgs outside US1, add an environment variable `DATADOG_SITE` (`datadoghq.eu`,
+   `us3.datadoghq.com`, `us5.datadoghq.com`, `ap1.datadoghq.com`, `ap2.datadoghq.com`, `ddog-gov.com`).
+4. Add the environment to the repository variable `DATADOG_DEPLOY_TARGETS`, a JSON list such as
+   `["datadog-production", "datadog-eu"]`. Without this variable only `datadog-production`
+   (which uses the repository secrets) deploys.
+
+Every push to `main` then deploys to each target. One org failing doesn't stop the others. To try
+a new org first, run the workflow manually (**Actions → Datadog App → Run workflow**) with that
+environment as `target`. Links inside the app point at the org it's embedded in, so they work in
+every org. The app keeps the same `id` everywhere; each org gets its own copy.
+
+To deploy manually instead: `npm run upload` publishes live immediately to the org you're logged
+into. Use `npx datadog-apps upload --org <org UUID>` or `--site <site>` to pick another org; run
+`npx datadog-apps auth status` to list them.
 
 > Never change `id` in `datadog-app.config.json`. It is the app's permanent identity, and changing
 > it makes the next upload create a duplicate app.

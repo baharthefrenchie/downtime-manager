@@ -150,7 +150,7 @@ export function DetailPanel({ row, nowMs, density, onClose, onCancel, onExtend, 
                         {!isPlaceholder && (
                             <Button
                                 size="sm"
-                                href={downtimeUrl(match.downtime.id, raw?.url ?? match.downtime.url)}
+                                href={downtimeUrl(match.downtime.id)}
                                 isExternal
                                 label="Open downtime"
                             />

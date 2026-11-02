@@ -1,13 +1,25 @@
 name: Datadog App
 
 # Pull requests: typecheck, lint, unit tests and a production build (no secrets needed).
-# Pushes to main: the same checks, then build, upload and publish the app live to Datadog.
+# Pushes to main: the same checks, then build, upload and publish the app live to every
+# Datadog org listed as a deploy target.
+#
+# Deploy targets are GitHub environments, one per Datadog org. Each holds that org's
+# DATADOG_API_KEY and DATADOG_APP_KEY secrets (repository secrets are used if the
+# environment has none) and, for orgs outside US1, a DATADOG_SITE variable such as
+# datadoghq.eu. List the environments in the repository variable DATADOG_DEPLOY_TARGETS,
+# e.g. ["datadog-production", "datadog-eu"]. Without it, only datadog-production deploys.
 on:
   pull_request:
   push:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      target:
+        description: Deploy only to this environment (leave empty for all deploy targets)
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -43,15 +55,20 @@ jobs:
         run: npm run build
 
   deploy:
-    name: Deploy Datadog App
+    name: Deploy to ${{ matrix.target }}
     needs: checks
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
-    # Add required reviewers to this environment in GitHub to gate production deploys.
-    environment: datadog-production
-    # Never run two deploys at once; a newer push waits for the current deploy.
+    strategy:
+      # One org failing (for example, an expired key) doesn't stop the others.
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(inputs.target && format('["{0}"]', inputs.target) || vars.DATADOG_DEPLOY_TARGETS || '["datadog-production"]') }}
+    # Add required reviewers to an environment in GitHub to gate deploys to that org.
+    environment: ${{ matrix.target }}
+    # Never run two deploys to the same org at once; a newer push waits for the current one.
     concurrency:
-      group: datadog-app-deploy
+      group: datadog-app-deploy-${{ matrix.target }}
       cancel-in-progress: false
     permissions:
       contents: read
@@ -67,7 +84,11 @@ jobs:
 
       - name: Deploy
         uses: DataDog/apps-github-action@2c2495d48c9569b6eace166a5d43e60d9e5b81da # v0.1.1
+        env:
+          # Also read by vite.config.ts, so in-app links fall back to the right site.
+          DD_SITE: ${{ vars.DATADOG_SITE }}
         with:
           datadog-api-key: ${{ secrets.DATADOG_API_KEY }}
           datadog-app-key: ${{ secrets.DATADOG_APP_KEY }}
+          datadog-site: ${{ vars.DATADOG_SITE }}
           app-directory: .

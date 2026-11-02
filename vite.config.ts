@@ -7,6 +7,9 @@ import datadogAppConfig from './datadog-app.config.json' with { type: 'json' };
 
 const { version } = packageJson;
 
+// The site to build and upload for: DD_SITE (set per deploy target in CI) wins over the config file.
+const datadogSite = process.env.DD_SITE || process.env.DATADOG_SITE || datadogAppConfig.datadogSite;
+
 const hasDatadogApiKeys = Boolean(
     (process.env.DD_API_KEY || process.env.DATADOG_API_KEY) &&
         (process.env.DD_APP_KEY || process.env.DATADOG_APP_KEY),
@@ -14,33 +17,23 @@ const hasDatadogApiKeys = Boolean(
 
 export default defineConfig({
     base: './',
+    define: {
+        'import.meta.env.VITE_DATADOG_SITE': JSON.stringify(datadogSite),
+    },
     build: {
         sourcemap: true,
-        // The DRUIDS design system is ~1.3 MB minified and can't be split safely (see
-        // below), so the limit sits just above it. App code is ~40 kB; anything else
-        // growing past this still warns.
-        chunkSizeWarningLimit: 1400,
-        rolldownOptions: {
-            output: {
-                // Keep vendor code in separately cached chunks instead of one bundle.
-                // DRUIDS must stay a single chunk: splitting it by size breaks its
-                // module initialization order at runtime.
-                codeSplitting: {
-                    groups: [
-                        { name: 'vendor-react', test: /node_modules[\\/](react|react-dom|scheduler)[\\/]/, priority: 30 },
-                        { name: 'vendor-druids', test: /node_modules[\\/]@datadog[\\/]druids[\\/]/, priority: 20 },
-                        { name: 'vendor', test: /node_modules[\\/]/, priority: 10 },
-                    ],
-                },
-            },
-        },
+        // One main bundle: the DRUIDS design system alone is ~1.3 MB minified and splitting
+        // it apart breaks its module initialization order. Library-only chunks would also
+        // trigger Error Tracking's "not in the tracked files" source-map warning. The limit
+        // sits just above the bundle so growth in app code (~40 kB) still warns.
+        chunkSizeWarningLimit: 1600,
     },
     plugins: [
         react(),
         datadogVitePlugin({
             logLevel: 'info',
             auth: {
-                site: process.env.DD_SITE || datadogAppConfig.datadogSite,
+                site: datadogSite,
                 apiKey: process.env.DD_API_KEY,
                 appKey: process.env.DD_APP_KEY,
             },
