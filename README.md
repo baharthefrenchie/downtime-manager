@@ -20,6 +20,14 @@ active downtimes, using live data from the Datadog org it runs in.
   with relative times. Open-ended downtimes show *Indefinitely*.
 - **Actions:** inspect (side panel with raw get-downtime JSON), **extend** and **cancel**. Both
   re-read the downtime live and refuse if it is no longer active.
+- **Downtime and its SLO corrections together:** the extend and cancel dialogs list the SLO
+  corrections linked to the downtime, all ticked by default. A correction is linked when it is
+  one-time, hasn't ended, starts within 5 minutes of the downtime's start, and targets one of the
+  downtime's related SLOs (by SLO or by tag query). Extending moves each ticked correction to the
+  same new end; canceling ends an active correction now, or deletes one that hasn't started. The
+  downtime changes first, then each correction; the result lists what succeeded and what failed,
+  and a failed correction never rolls back the downtime change. Recurring corrections are never
+  changed here (the dialog says how many there are); edit them in Datadog.
 - **Who changed it:** extending or canceling a downtime or SLO correction appends a line to its
   message or description, keeping the existing text, for example
   `Extended to 2026-11-02T18:00:00.000Z by Ada Lovelace (ada@example.com) via Downtime Manager at 2026-11-02T12:00:00.000Z`.
@@ -66,7 +74,9 @@ needs:
 - **Monitors Downtime** (`monitors_downtime`): cancel and extend downtimes.
 - **User Access Read**: show downtime creators' names.
 - **SLOs Read**: list SLOs and their corrections.
-- **SLOs Corrections** (`slos_corrections`): extend and cancel SLO corrections.
+- **SLOs Corrections** (`slos_corrections`): extend and cancel SLO corrections, including the ones
+  changed together with a downtime. Without it, the downtime still changes and each correction is
+  reported as refused with this permission named.
 
 A service account with exactly these permissions is the safest owner for the deploy key. Who can
 open the app is controlled separately, in the app's permissions in App Builder.

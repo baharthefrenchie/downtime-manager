@@ -9,6 +9,10 @@ import {
     correctionExtendBlockedReason,
     correctionView,
     currentCorrections,
+    downtimeRelatedSlos,
+    LINK_START_TOLERANCE_MS,
+    linkedCorrections,
+    linkedExtendBlockedReason,
     relatedSlos,
     type SloCorrectionSummary,
     type SloSummary,
@@ -184,5 +188,69 @@ describe('SLO corrections', () => {
         assert.equal(describeRrule('FREQ=WEEKLY;INTERVAL=1'), 'weekly');
         assert.equal(describeRrule('FREQ=DAILY;INTERVAL=2'), 'every 2 days');
         assert.equal(describeRrule('FREQ=WEEKLY;INTERVAL=1;BYDAY=MO,TU'), 'weekly on MO,TU');
+    });
+});
+
+describe('corrections linked to a downtime', () => {
+    const MIN = 60;
+    const downtimeStartS = nowS - HOUR;
+    const gen2Slo = slo('gen2', { type: 'metric', tags: ['project:gen2'] });
+    const otherSlo = slo('other', { type: 'metric', tags: ['project:gen3'] });
+    const linkedIds = (corrections: SloCorrectionSummary[], slos = [gen2Slo]) =>
+        linkedCorrections(downtimeStartS * 1000, slos, corrections, NOW).linked.map((l) => l.view.correction.id);
+
+    it('links one-time corrections starting within 5 minutes of the downtime', () => {
+        assert.equal(LINK_START_TOLERANCE_MS, 5 * 60_000);
+        assert.deepEqual(
+            linkedIds([
+                correction('exact', { sloId: 'gen2', start: downtimeStartS }),
+                correction('4m-early', { sloId: 'gen2', start: downtimeStartS - 4 * MIN }),
+                correction('5m-late', { sloId: 'gen2', start: downtimeStartS + 5 * MIN }),
+                correction('6m-late', { sloId: 'gen2', start: downtimeStartS + 6 * MIN }),
+                correction('1h-early', { sloId: 'gen2', start: downtimeStartS - HOUR }),
+            ]),
+            ['4m-early', 'exact', '5m-late'],
+        );
+    });
+
+    it('matches by SLO id or by a tag query on the related SLOs', () => {
+        assert.deepEqual(
+            linkedIds([
+                correction('by-query', { sloId: null, sloQuery: 'project:gen2', start: downtimeStartS }),
+                correction('wrong-query', { sloId: null, sloQuery: 'project:gen3', start: downtimeStartS }),
+                correction('wrong-slo', { sloId: 'other', start: downtimeStartS }),
+            ]),
+            ['by-query'],
+        );
+    });
+
+    it('never links recurring corrections, but reports them', () => {
+        const recurring = correction('weekly', { sloId: 'gen2', start: downtimeStartS, end: null, duration: HOUR, rrule: 'FREQ=WEEKLY' });
+        const result = linkedCorrections(downtimeStartS * 1000, [gen2Slo], [recurring], NOW);
+        assert.deepEqual(result.linked, []);
+        assert.deepEqual(result.recurring.map((r) => r.view.correction.id), ['weekly']);
+    });
+
+    it('links nothing when no correction matches', () => {
+        assert.deepEqual(linkedIds([correction('ended', { sloId: 'gen2', start: downtimeStartS, end: nowS - 60 })]), []);
+        assert.deepEqual(linkedIds([correction('c', { sloId: 'gen2', start: downtimeStartS })], [otherSlo]), []);
+        assert.deepEqual(linkedIds([correction('c', { sloId: 'gen2', start: downtimeStartS })], []), []);
+        assert.deepEqual(linkedCorrections(null, [gen2Slo], [correction('c', { sloId: 'gen2' })], NOW).linked, []);
+    });
+
+    it('uses the SLOs related through that downtime only', () => {
+        const rows = rowsFor(
+            [monitor(1, ['env:prod', 'project:gen2']), monitor(2, ['env:staging'])],
+            [downtime('t', { monitorTags: ['env:prod'], scope: 'project:gen2' }), downtime('d', { monitorId: 2 })],
+        );
+        const slos = [gen2Slo, otherSlo, slo('uses-2', { monitorIds: [2] })];
+        assert.deepEqual(downtimeRelatedSlos('t', rows, slos).map((s) => s.id), ['gen2']);
+        assert.deepEqual(downtimeRelatedSlos('d', rows, slos).map((s) => s.id), ['uses-2']);
+    });
+
+    it("won't move a correction's end earlier when extending with the downtime", () => {
+        const view = correctionView(correction('c', { start: downtimeStartS, end: nowS + 2 * HOUR }), NOW);
+        assert.equal(linkedExtendBlockedReason(view, NOW + 3 * HOUR * 1000), null);
+        assert.match(linkedExtendBlockedReason(view, NOW + HOUR * 1000) ?? '', /Already ends/);
     });
 });

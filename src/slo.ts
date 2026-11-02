@@ -171,3 +171,83 @@ export function correctionCancelBlockedReason(view: CorrectionView): string | nu
     if (view.state === 'Recurring') return 'Recurring correction: edit or delete it in Datadog.';
     return null;
 }
+
+/** How close a correction's start must be to the downtime's start to count as its correction. */
+export const LINK_START_TOLERANCE_MS = 5 * 60_000;
+
+export interface LinkedCorrection {
+    view: CorrectionView;
+    /** The downtime's related SLOs this correction applies to. */
+    slos: SloSummary[];
+}
+
+export interface DowntimeCorrections {
+    /** One-time corrections that start with the downtime (within 5 minutes) on its related SLOs. */
+    linked: LinkedCorrection[];
+    /** Recurring corrections on the same SLOs: out of scope, edited in Datadog. */
+    recurring: LinkedCorrection[];
+}
+
+/**
+ * SLOs related through one downtime: for every monitor it covers, the SLOs
+ * related through that downtime alone (same rules and mode as {@link relatedSlos}).
+ */
+export function downtimeRelatedSlos(
+    downtimeId: string,
+    rows: CoverageRow[],
+    slos: SloSummary[],
+    mode: SloMatchMode = 'scope',
+): SloSummary[] {
+    const byId = new Map<string, SloSummary>();
+    for (const row of rows) {
+        const match = row.matches.find((m) => m.downtime.id === downtimeId);
+        if (!match || match.downtime.isPlaceholder) continue;
+        const only: CoverageRow = {
+            ...row,
+            matches: [match],
+            primary: match,
+            source: match.kind === 'direct' ? 'Direct (monitor ID)' : 'Tag/Scope-based',
+        };
+        relatedSlos(only, slos, mode).forEach(({ slo }) => byId.set(slo.id, slo));
+    }
+    return [...byId.values()];
+}
+
+/**
+ * The SLO corrections linked to a downtime: one-time corrections, not ended,
+ * whose start is within {@link LINK_START_TOLERANCE_MS} of the downtime's
+ * start, and whose SLO (or tag query) matches one of the downtime's related
+ * SLOs. Recurring corrections on those SLOs are returned separately and never
+ * changed.
+ */
+export function linkedCorrections(
+    downtimeStartMs: number | null,
+    downtimeSlos: SloSummary[],
+    corrections: SloCorrectionSummary[],
+    nowMs: number,
+): DowntimeCorrections {
+    const linked: LinkedCorrection[] = [];
+    const recurring: LinkedCorrection[] = [];
+    if (downtimeSlos.length === 0) return { linked, recurring };
+    for (const correction of corrections) {
+        const slos = downtimeSlos.filter((slo) => correctionAppliesTo(correction, slo));
+        if (slos.length === 0) continue;
+        const view = correctionView(correction, nowMs);
+        if (view.state === 'Recurring') {
+            recurring.push({ view, slos });
+            continue;
+        }
+        if (view.state === 'Ended' || downtimeStartMs === null || view.startMs === null) continue;
+        if (Math.abs(view.startMs - downtimeStartMs) <= LINK_START_TOLERANCE_MS) linked.push({ view, slos });
+    }
+    const byStart = (a: LinkedCorrection, b: LinkedCorrection) => (a.view.startMs ?? 0) - (b.view.startMs ?? 0);
+    return { linked: linked.sort(byStart), recurring: recurring.sort(byStart) };
+}
+
+/** Why a linked correction can't be moved to `newEndMs` with its downtime, or null if it can. */
+export function linkedExtendBlockedReason(view: CorrectionView, newEndMs: number): string | null {
+    const blocked = correctionExtendBlockedReason(view);
+    if (blocked) return blocked;
+    if (view.endMs !== null && view.endMs >= newEndMs) return 'Already ends at or after the new end.';
+    return null;
+}

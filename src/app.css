@@ -276,3 +276,20 @@ body,
     align-items: center;
     gap: 6px;
 }
+
+.linked-corrections {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 220px;
+    overflow-y: auto;
+}
+
+.toast-details {
+    margin: 6px 0 0;
+    padding-left: 0;
+    list-style: none;
+    font-size: 12px;
+    max-height: 160px;
+    overflow-y: auto;
+}
