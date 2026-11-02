@@ -7,7 +7,10 @@ import { describe, it } from 'node:test';
 
 import {
     buildCoverageRows,
+    evaluateScope,
     isActiveDowntime,
+    parseScope,
+    positiveScopeTerms,
     toValidMs,
     isPlaceholderRow,
     windowStateOf,
@@ -182,5 +185,95 @@ describe('windowStateOf', () => {
         assert.equal(windowStateOf({ startMs: NOW - HOUR, endMs: NOW + 3 * DAY }, NOW), 'Scheduled end');
         assert.equal(windowStateOf({ startMs: NOW - DAY, endMs: null }, NOW), 'Open-ended');
         assert.equal(windowStateOf({ startMs: NOW - 60 * DAY, endMs: null }, NOW), 'Stale');
+    });
+});
+
+describe('downtime scope parser', () => {
+    const satisfied = (scope: string, tags: string[]) => evaluateScope(parseScope(scope), tags);
+
+    it('A OR B is satisfied when only B is present', () => {
+        assert.equal(satisfied('service:api OR service:web', ['service:web']), true);
+        assert.equal(satisfied('service:api OR service:web', ['service:db']), false);
+    });
+
+    it('(A OR B) AND C needs C and one of A or B', () => {
+        const scope = '(service:api OR service:web) AND env:prod';
+        assert.equal(satisfied(scope, ['service:web', 'env:prod']), true);
+        assert.equal(satisfied(scope, ['service:web']), false);
+        assert.equal(satisfied(scope, ['env:prod']), false);
+        // Implicit AND between terms behaves the same.
+        assert.equal(satisfied('(service:api OR service:web) env:prod', ['service:api', 'env:prod']), true);
+    });
+
+    it('A AND -B is satisfied when A is present and no tag matches B', () => {
+        assert.equal(satisfied('env:prod AND -host:canary', ['env:prod', 'host:web-1']), true);
+        assert.equal(satisfied('env:prod AND -host:canary', ['env:prod', 'host:canary']), false);
+        assert.equal(satisfied('env:prod -host:canary*', ['env:prod', 'host:canary-2']), false);
+    });
+
+    it('NOT A is satisfied when no tag matches A', () => {
+        assert.equal(satisfied('NOT env:staging', ['env:prod']), true);
+        assert.equal(satisfied('NOT env:staging', ['env:staging']), false);
+        assert.equal(satisfied('!env:staging', ['env:staging']), false);
+    });
+
+    it('handles nested parentheses', () => {
+        const scope = 'env:prod AND ((service:api AND region:us) OR (service:web AND NOT region:eu))';
+        assert.equal(satisfied(scope, ['env:prod', 'service:api', 'region:us']), true);
+        assert.equal(satisfied(scope, ['env:prod', 'service:web', 'region:us']), true);
+        assert.equal(satisfied(scope, ['env:prod', 'service:web', 'region:eu']), false);
+        assert.equal(satisfied(scope, ['env:prod', 'service:api', 'region:eu']), false);
+    });
+
+    it('treats * alone (or an empty scope) as every group', () => {
+        assert.deepEqual(parseScope('*'), { type: 'all' });
+        assert.deepEqual(parseScope(''), { type: 'all' });
+        assert.equal(satisfied('*', []), true);
+    });
+
+    it('lists only positive terms, with wildcards, quotes and commas', () => {
+        assert.deepEqual(positiveScopeTerms('env:prod AND (service:api OR service:web) -host:a NOT team:db'), [
+            'env:prod',
+            'service:api',
+            'service:web',
+        ]);
+        assert.deepEqual(positiveScopeTerms('host:"i-123",service:web-*'), ['host:i-123', 'service:web-*']);
+        assert.deepEqual(positiveScopeTerms('-host:a'), []);
+    });
+});
+
+describe('buildCoverageRows with OR and NOT scopes', () => {
+    it('counts A OR B as whole-monitor coverage when the monitor has only B', () => {
+        const [row] = rows([monitor(1, ['service:web'])], [downtime('d', { monitorId: 1, scope: 'service:api OR service:web' })]);
+        assert.equal(row.maintenanceState, 'Whole monitor');
+        const [scoped] = rows([monitor(2, ['service:web'])], [downtime('s', { monitorTags: ['*'], scope: 'service:api OR service:web' })]);
+        assert.equal(scoped.monitor.id, 2);
+        assert.equal(scoped.maintenanceState, 'Whole monitor');
+    });
+
+    it('requires C for (A OR B) AND C', () => {
+        const scope = '(service:api OR service:web) AND env:prod';
+        const result = rows(
+            [monitor(1, ['service:web', 'env:prod']), monitor(2, ['service:web'])],
+            [downtime('s', { monitorTags: ['*'], scope })],
+        );
+        assert.deepEqual(result.map((r) => r.monitor.id), [1]);
+        const [direct] = rows([monitor(3, ['service:web'])], [downtime('d', { monitorId: 3, scope })]);
+        assert.equal(direct.maintenanceState, 'Groups only');
+    });
+
+    it('A AND -B covers the whole monitor only when the monitor lacks B', () => {
+        const scope = 'env:prod AND -host:canary';
+        const [clean] = rows([monitor(1, ['env:prod'])], [downtime('d', { monitorId: 1, scope })]);
+        assert.equal(clean.maintenanceState, 'Whole monitor');
+        const [excluded] = rows([monitor(2, ['env:prod', 'host:canary'])], [downtime('d', { monitorId: 2, scope })]);
+        assert.equal(excluded.maintenanceState, 'Groups only');
+    });
+
+    it('counts a scope with only negated terms as all groups, as before', () => {
+        for (const scope of ['-host:a', 'NOT host:a', '-host:a -host:b']) {
+            const [row] = rows([monitor(1)], [downtime('d', { monitorId: 1, scope })]);
+            assert.equal(row.maintenanceState, 'Whole monitor', scope);
+        }
     });
 });
