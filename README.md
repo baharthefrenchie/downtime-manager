@@ -1,7 +1,5 @@
 # downtime-manager
 
-An app to help on-callers and managers manage downtime.
-
 **On-Call Maintenance Downtime Manager** is a [Datadog App](https://docs.datadoghq.com/actions/datadog_apps/)
 (React + TypeScript, built with DRUIDS) that shows which monitors are currently muted by
 active downtimes, using live data from the Datadog org it runs in.
