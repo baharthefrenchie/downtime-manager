@@ -154,7 +154,7 @@ function globToRegExp(pattern: string): RegExp {
     return new RegExp(`^${escaped}$`, 'i');
 }
 
-function tagMatches(pattern: string, monitorTags: string[]): boolean {
+export function tagMatches(pattern: string, monitorTags: string[]): boolean {
     const regex = globToRegExp(pattern.trim());
     return monitorTags.some((tag) => regex.test(tag.trim()));
 }

@@ -182,3 +182,42 @@ body,
     width: min(420px, calc(100vw - 24px));
     box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
 }
+
+/* Related SLOs in the detail panel */
+.slo-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.slo-item {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px 12px;
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-border-radius, 4px);
+}
+
+.slo-item-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.slo-correction {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 6px;
+    padding-top: 8px;
+    border-top: 1px dashed var(--ui-border);
+}
+
+.table-heading-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+}

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 
 import { Modal } from '@datadog/druids/dialogs/Modal';
 import { Button } from '@datadog/druids/form/Button';
@@ -6,7 +6,8 @@ import { MessageBox } from '@datadog/druids/misc/MessageBox';
 import { Text } from '@datadog/druids/typography/Text';
 
 import type { CoverageRow, DowntimeMatch } from './coverage';
-import { extendBlockedReason, formatEnd, formatRelative } from './format';
+import { extendBlockedReason, formatEnd, formatRelative, formatStart } from './format';
+import { correctionExtendBlockedReason, type CorrectionView } from './slo';
 
 interface CancelModalProps {
     target: { row: CoverageRow; match: DowntimeMatch } | null;
@@ -87,56 +88,66 @@ function toLocalInputValue(ms: number): string {
     return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-interface ExtendModalProps {
-    target: { row: CoverageRow; match: DowntimeMatch } | null;
+interface ExtendEndModalProps {
+    title: string;
+    /** What is being extended, shown above the presets. */
+    subject: ReactNode;
+    currentEndMs: number | null;
     nowMs: number;
+    blockedReason: string | null;
+    /** What the update leaves alone, e.g. "The scope and start stay unchanged." */
+    unchangedNote: string;
+    confirmLabel: string;
     isPending: boolean;
     error: string | null;
     onClose: () => void;
-    onConfirm: (downtimeId: string, newEndIso: string) => void;
+    onConfirm: (newEndIso: string) => void;
 }
 
-export function ExtendDowntimeModal({ target, nowMs, isPending, error, onClose, onConfirm }: ExtendModalProps) {
-    const baseMs = target?.match.endMs ?? nowMs;
+/** Shared "move the end later" dialog for downtimes and SLO corrections. */
+export function ExtendEndModal({
+    title,
+    subject,
+    currentEndMs,
+    nowMs,
+    blockedReason,
+    unchangedNote,
+    confirmLabel,
+    isPending,
+    error,
+    onClose,
+    onConfirm,
+}: ExtendEndModalProps) {
+    const baseMs = currentEndMs ?? nowMs;
     const [newEndMs, setNewEndMs] = useState<number>(baseMs + EXTEND_PRESETS[0].ms);
-
-    if (!target) {
-        return null;
-    }
-    const { row, match } = target;
-    const blocked = extendBlockedReason(match);
-    const isValid = !blocked && Number.isFinite(newEndMs) && newEndMs > baseMs && newEndMs > nowMs + 60_000;
+    const isValid = !blockedReason && Number.isFinite(newEndMs) && newEndMs > baseMs && newEndMs > nowMs + 60_000;
 
     return (
         <Modal
             isOpen
             onClose={onClose}
             size="md"
-            title="Extend active downtime"
+            title={title}
             hasFooterSeparator
             footer={
                 <div className="modal-footer-right">
                     <Button label="Close" onClick={onClose} isDisabled={isPending} />
                     <Button
                         isPrimary
-                        label="Extend downtime"
+                        label={confirmLabel}
                         isLoading={isPending}
                         isDisabled={!isValid}
-                        onClick={() => onConfirm(match.downtime.id, new Date(newEndMs).toISOString())}
+                        onClick={() => onConfirm(new Date(newEndMs).toISOString())}
                     />
                 </div>
             }
         >
             <Text as="p" marginBottom="sm">
-                Downtime <Text isMonospace as="span">{match.downtime.id}</Text> on{' '}
-                <Text weight="bold" as="span">
-                    {row.monitor.name}
-                </Text>{' '}
-                currently ends <Text weight="bold" as="span">{formatEnd(match.endMs)}</Text> (
-                {formatRelative(match.endMs, nowMs)}).
+                {subject} currently ends <Text weight="bold" as="span">{formatEnd(currentEndMs)}</Text> (
+                {formatRelative(currentEndMs, nowMs)}).
             </Text>
-            {blocked ? (
-                <MessageBox level="warning">{blocked}</MessageBox>
+            {blockedReason ? (
+                <MessageBox level="warning">{blockedReason}</MessageBox>
             ) : (
                 <>
                     <div className="match-list extend-presets">
@@ -164,13 +175,142 @@ export function ExtendDowntimeModal({ target, nowMs, isPending, error, onClose, 
                     </label>
                     <MessageBox level={isValid ? 'default' : 'danger'} marginTop="sm">
                         {isValid
-                            ? `New end: ${formatEnd(newEndMs)} (${formatRelative(newEndMs, nowMs)}). The scope and start stay unchanged.`
+                            ? `New end: ${formatEnd(newEndMs)} (${formatRelative(newEndMs, nowMs)}). ${unchangedNote}`
                             : 'Pick an end time later than the current end.'}
                     </MessageBox>
                 </>
             )}
             {error && (
                 <MessageBox level="danger" title="Extend failed" marginTop="sm">
+                    {error}
+                </MessageBox>
+            )}
+        </Modal>
+    );
+}
+
+interface ExtendModalProps {
+    target: { row: CoverageRow; match: DowntimeMatch } | null;
+    nowMs: number;
+    isPending: boolean;
+    error: string | null;
+    onClose: () => void;
+    onConfirm: (downtimeId: string, newEndIso: string) => void;
+}
+
+export function ExtendDowntimeModal({ target, nowMs, isPending, error, onClose, onConfirm }: ExtendModalProps) {
+    if (!target) {
+        return null;
+    }
+    const { row, match } = target;
+    return (
+        <ExtendEndModal
+            title="Extend active downtime"
+            subject={
+                <>
+                    Downtime <Text isMonospace as="span">{match.downtime.id}</Text> on{' '}
+                    <Text weight="bold" as="span">
+                        {row.monitor.name}
+                    </Text>
+                </>
+            }
+            currentEndMs={match.endMs}
+            nowMs={nowMs}
+            blockedReason={extendBlockedReason(match)}
+            unchangedNote="The scope and start stay unchanged."
+            confirmLabel="Extend downtime"
+            isPending={isPending}
+            error={error}
+            onClose={onClose}
+            onConfirm={(newEndIso) => onConfirm(match.downtime.id, newEndIso)}
+        />
+    );
+}
+
+export type CorrectionTarget = { view: CorrectionView; sloName: string };
+
+interface ExtendCorrectionModalProps {
+    target: CorrectionTarget;
+    nowMs: number;
+    isPending: boolean;
+    error: string | null;
+    onClose: () => void;
+    onConfirm: (correctionId: string, newEndIso: string) => void;
+}
+
+export function ExtendCorrectionModal({ target, nowMs, isPending, error, onClose, onConfirm }: ExtendCorrectionModalProps) {
+    const { view, sloName } = target;
+    return (
+        <ExtendEndModal
+            title="Extend SLO correction"
+            subject={
+                <>
+                    The {view.correction.category} correction on{' '}
+                    <Text weight="bold" as="span">
+                        {sloName}
+                    </Text>
+                </>
+            }
+            currentEndMs={view.endMs}
+            nowMs={nowMs}
+            blockedReason={correctionExtendBlockedReason(view)}
+            unchangedNote="The start stays unchanged."
+            confirmLabel="Extend correction"
+            isPending={isPending}
+            error={error}
+            onClose={onClose}
+            onConfirm={(newEndIso) => onConfirm(view.correction.id, newEndIso)}
+        />
+    );
+}
+
+interface CancelCorrectionModalProps {
+    target: CorrectionTarget;
+    isPending: boolean;
+    error: string | null;
+    onClose: () => void;
+    onConfirm: (correctionId: string) => void;
+}
+
+export function CancelCorrectionModal({ target, isPending, error, onClose, onConfirm }: CancelCorrectionModalProps) {
+    const { view, sloName } = target;
+    const isScheduled = view.state === 'Scheduled';
+    const appliesTo = view.correction.sloQuery ? `every SLO matching \`${view.correction.sloQuery}\`` : sloName;
+    return (
+        <Modal
+            isOpen
+            onClose={onClose}
+            size="md"
+            title={isScheduled ? 'Delete scheduled SLO correction?' : 'End SLO correction now?'}
+            hasFooterSeparator
+            footer={
+                <div className="modal-footer-right">
+                    <Button label="Keep correction" onClick={onClose} isDisabled={isPending} />
+                    <Button
+                        level="danger"
+                        isPrimary
+                        label={isScheduled ? 'Delete correction' : 'End correction now'}
+                        isLoading={isPending}
+                        onClick={() => onConfirm(view.correction.id)}
+                    />
+                </div>
+            }
+        >
+            <Text as="p" marginBottom="sm">
+                {view.correction.category} correction on{' '}
+                <Text weight="bold" as="span">
+                    {appliesTo}
+                </Text>
+                , {formatStart(view.startMs)} → {formatEnd(view.endMs)}.
+            </Text>
+            <MessageBox level="warning" marginBottom="sm">
+                {isScheduled
+                    ? "It hasn't started yet, so it will be deleted. Nothing has been excluded from the SLO."
+                    : 'Its end moves to now, so the SLO stops excluding time from this moment. The time already excluded stays excluded.'}
+                {view.correction.sloQuery && ' This correction applies to every SLO matching its query, not only this one.'}
+            </MessageBox>
+            {error && (
+                <MessageBox level="danger" title="Cancel failed">
                     {error}
                 </MessageBox>
             )}

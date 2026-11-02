@@ -16,10 +16,13 @@ import { Text } from '@datadog/druids/typography/Text';
 import { windowStateOf, type CoverageRow, type DatadogDowntimeMatch, type DowntimeMatch } from './coverage';
 import {
     cancelBlockedReason,
+    correctionStateLevel,
+    correctionTiming,
     downtimeUrl,
     extendBlockedReason,
     formatEnd,
     formatRelative,
+    formatPercent,
     formatStart,
     friendlyError,
     MAINTENANCE_HINTS,
@@ -28,11 +31,19 @@ import {
     monitorStateLevel,
     monitorUrl,
     mutedScopeLabel,
+    sloUrl,
     windowDetail,
     windowLevel,
 } from './format';
 import type { Density } from './hooks';
+import type { CorrectionTarget } from './DowntimeModals';
 import { fetchDatadogMatches, fetchDowntimeDetail } from './maintenance.backend';
+import {
+    correctionCancelBlockedReason,
+    correctionExtendBlockedReason,
+    type CorrectionView,
+    type RelatedSlo,
+} from './slo';
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
     return (
@@ -95,10 +106,115 @@ interface DetailPanelProps {
     onExtend: (row: CoverageRow, match: DowntimeMatch) => void;
     /** Receives Datadog's downtimes for a monitor whose downtime isn't in the downtime list. */
     onDatadogMatchesLoaded: (monitorId: number, matches: DatadogDowntimeMatch[]) => void;
+    /** SLOs related to this monitor; undefined while SLOs are loading. */
+    relatedSlos: RelatedSlo[] | undefined;
+    correctionsBySlo: Map<string, CorrectionView[]>;
+    onExtendCorrection: (target: CorrectionTarget) => void;
+    onCancelCorrection: (target: CorrectionTarget) => void;
+}
+
+function RelatedSlosSection({
+    relatedSlos,
+    correctionsBySlo,
+    nowMs,
+    onExtendCorrection,
+    onCancelCorrection,
+}: Pick<DetailPanelProps, 'relatedSlos' | 'correctionsBySlo' | 'nowMs' | 'onExtendCorrection' | 'onCancelCorrection'>) {
+    if (relatedSlos === undefined) {
+        return <Text variant="tertiary">Loading SLOs…</Text>;
+    }
+    if (relatedSlos.length === 0) {
+        return (
+            <Text variant="tertiary">
+                No SLO uses this monitor or shares the tags of the downtime that covers it.
+            </Text>
+        );
+    }
+    return (
+        <div className="slo-list">
+            {relatedSlos.map(({ slo, relation, matchedTags }) => {
+                const corrections = correctionsBySlo.get(slo.id) ?? [];
+                return (
+                    <div key={slo.id} className="slo-item">
+                        <div className="slo-item-head">
+                            <Button isNaked isTitleCased={false} hasEllipsisWithTooltip href={sloUrl(slo.id)} isExternal label={slo.name} />
+                            <StatusPill isSoft level={relation === 'Monitor-based SLO' ? 'success' : 'default'}>
+                                {relation}
+                            </StatusPill>
+                        </div>
+                        <Text as="div" size="xs" variant="tertiary">
+                            {slo.type} SLO · SLI {formatPercent(slo.sli)}
+                            {slo.target !== null ? ` (target ${slo.target}%)` : ''} · error budget{' '}
+                            {formatPercent(slo.errorBudgetRemaining, 1)}
+                            {slo.timeframe ? ` · ${slo.timeframe}` : ''}
+                            {matchedTags.length > 0 ? ` · tags ${matchedTags.join(', ')}` : ''}
+                        </Text>
+                        {corrections.length === 0 ? (
+                            <Text as="div" size="xs" variant="tertiary" marginTop="xxs">
+                                No current corrections.
+                            </Text>
+                        ) : (
+                            corrections.map((view) => {
+                                const extendBlocked = correctionExtendBlockedReason(view);
+                                const cancelBlocked = correctionCancelBlockedReason(view);
+                                const target = { view, sloName: slo.name };
+                                return (
+                                    <div key={view.correction.id} className="slo-correction">
+                                        <div className="slo-item-head">
+                                            <StatusPill level={correctionStateLevel(view.state)}>{view.state}</StatusPill>
+                                            <Text size="sm">{view.correction.category}</Text>
+                                        </div>
+                                        <Text as="div" size="xs" variant="tertiary">
+                                            {correctionTiming(view, nowMs)}
+                                            {view.state !== 'Recurring' &&
+                                                ` · ${formatStart(view.startMs)} → ${formatEnd(view.endMs)}`}
+                                            {view.correction.description ? ` · ${view.correction.description}` : ''}
+                                            {view.correction.sloQuery ? ` · applies to SLOs matching ${view.correction.sloQuery}` : ''}
+                                        </Text>
+                                        <div className="panel-actions">
+                                            <Button
+                                                size="sm"
+                                                icon={ClockIcon}
+                                                label="Extend"
+                                                isDisabled={Boolean(extendBlocked)}
+                                                tooltip={extendBlocked ?? undefined}
+                                                onClick={() => onExtendCorrection(target)}
+                                            />
+                                            <Button
+                                                size="sm"
+                                                level="danger"
+                                                icon={TrashIcon}
+                                                label={view.state === 'Scheduled' ? 'Delete' : 'End now'}
+                                                isDisabled={Boolean(cancelBlocked)}
+                                                tooltip={cancelBlocked ?? undefined}
+                                                onClick={() => onCancelCorrection(target)}
+                                            />
+                                        </div>
+                                    </div>
+                                );
+                            })
+                        )}
+                    </div>
+                );
+            })}
+        </div>
+    );
 }
 
 /** Datadog-style side panel with the selected monitor's active downtime details. */
-export function DetailPanel({ row, nowMs, density, onClose, onCancel, onExtend, onDatadogMatchesLoaded }: DetailPanelProps) {
+export function DetailPanel({
+    row,
+    nowMs,
+    density,
+    onClose,
+    onCancel,
+    onExtend,
+    onDatadogMatchesLoaded,
+    relatedSlos,
+    correctionsBySlo,
+    onExtendCorrection,
+    onCancelCorrection,
+}: DetailPanelProps) {
     const [selectedId, setSelectedId] = useState<string | null>(row ? row.primary.downtime.id : null);
     const [showAllDowntimes, setShowAllDowntimes] = useState(false);
     const match = row?.matches.find((m) => m.downtime.id === selectedId) ?? row?.primary ?? null;
@@ -310,6 +426,17 @@ export function DetailPanel({ row, nowMs, density, onClose, onCancel, onExtend, 
                         <Spacing as="div" marginTop="md">
                             <DatadogStatus row={row} />
                         </Spacing>
+                    </Section>
+                    <HorizontalSeparator />
+
+                    <Section title={`Related SLOs${relatedSlos?.length ? ` (${relatedSlos.length})` : ''}`}>
+                        <RelatedSlosSection
+                            relatedSlos={relatedSlos}
+                            correctionsBySlo={correctionsBySlo}
+                            nowMs={nowMs}
+                            onExtendCorrection={onExtendCorrection}
+                            onCancelCorrection={onCancelCorrection}
+                        />
                     </Section>
                     <HorizontalSeparator />
 

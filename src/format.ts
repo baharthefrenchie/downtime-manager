@@ -1,4 +1,5 @@
 import type { CoverageRow, DowntimeMatch, WindowState } from './coverage';
+import type { CorrectionView } from './slo';
 
 type PillLevel = 'default' | 'success' | 'warning' | 'danger' | 'in-progress';
 
@@ -213,9 +214,10 @@ export interface ExportRecord {
     downtime_start: string;
     downtime_end: string;
     all_active_downtime_ids: string;
+    related_slos: string;
 }
 
-export function toExportRecords(rows: CoverageRow[]): ExportRecord[] {
+export function toExportRecords(rows: CoverageRow[], relatedSloNames: Map<number, string[]> = new Map()): ExportRecord[] {
     return rows.map((row) => ({
         monitor_id: row.monitor.id,
         monitor_name: row.monitor.name,
@@ -235,6 +237,7 @@ export function toExportRecords(rows: CoverageRow[]): ExportRecord[] {
         downtime_start: row.primary.startMs === null ? '' : new Date(row.primary.startMs).toISOString(),
         downtime_end: row.primary.endMs === null ? 'Indefinitely' : new Date(row.primary.endMs).toISOString(),
         all_active_downtime_ids: row.matches.map((m) => m.downtime.id).join('; '),
+        related_slos: (relatedSloNames.get(row.monitor.id) ?? []).join('; '),
     }));
 }
 
@@ -330,12 +333,16 @@ function rawErrorMessage(error: unknown): string {
 }
 
 /** Turns API failures into messages an on-call engineer can act on. */
-export function friendlyError(error: unknown, action = 'complete this action'): string {
+export function friendlyError(
+    error: unknown,
+    action = 'complete this action',
+    permission = '"Monitors Downtime" (monitors_downtime)',
+): string {
     const message = rawErrorMessage(error);
     if (/\b403\b|forbidden|not authorized|permission/i.test(message)) {
         // Published Datadog apps run as their author (the account whose keys deployed them),
         // not as the viewer, so the fix is on that account.
-        return `Datadog denied permission to ${action}. This app runs as its author (the account that deployed it), so ask a Datadog admin to grant that account the "Monitors Downtime" (monitors_downtime) permission.`;
+        return `Datadog denied permission to ${action}. This app runs as its author (the account that deployed it), so ask a Datadog admin to grant that account the ${permission} permission.`;
     }
     if (/\b401\b|unauthorized|authentication/i.test(message)) {
         return 'Your Datadog session expired. Reload the page and try again.';
@@ -347,4 +354,49 @@ export function friendlyError(error: unknown, action = 'complete this action'): 
         return 'This downtime no longer exists. Refresh to see the current state.';
     }
     return message;
+}
+
+/** Link to an SLO in the org the app runs in. */
+export function sloUrl(sloId: string): string {
+    return `${datadogBaseUrl()}/slo/manage?slo_id=${encodeURIComponent(sloId)}`;
+}
+
+export function correctionStateLevel(state: CorrectionView['state']): PillLevel {
+    switch (state) {
+        case 'Active':
+            return 'in-progress';
+        case 'Scheduled':
+            return 'success';
+        default:
+            return 'default';
+    }
+}
+
+/** How long a correction runs, and how much is left: "Ends in 2h 10m · 4h total", "Starts in 1d 2h · runs 3h". */
+export function correctionTiming(view: CorrectionView, nowMs: number): string {
+    const total = view.durationMs !== null ? formatDuration(view.durationMs) : null;
+    if (view.state === 'Recurring') {
+        return `${total ? `${total} each time` : 'Repeats'} · ${describeRrule(view.correction.rrule)}`;
+    }
+    if (view.state === 'Scheduled') {
+        return `Starts ${formatRelative(view.startMs, nowMs) ?? 'soon'}${total ? ` · runs ${total}` : ''}`;
+    }
+    return `Ends ${formatRelative(view.endMs, nowMs) ?? 'soon'}${total ? ` · ${total} total` : ''}`;
+}
+
+/** Short human reading of common iCalendar recurrence rules ("FREQ=WEEKLY;INTERVAL=1" → "weekly"). */
+export function describeRrule(rrule: string | null): string {
+    if (!rrule) return '';
+    const parts = Object.fromEntries(rrule.split(';').map((part) => part.split('=') as [string, string]));
+    const interval = Number(parts.INTERVAL ?? 1);
+    const unit = { DAILY: 'day', WEEKLY: 'week', MONTHLY: 'month', YEARLY: 'year', HOURLY: 'hour' }[parts.FREQ ?? ''];
+    if (!unit) return rrule;
+    const single: Record<string, string> = { day: 'daily', week: 'weekly', month: 'monthly', year: 'yearly', hour: 'hourly' };
+    const every = interval > 1 ? `every ${interval} ${unit}s` : single[unit];
+    return parts.BYDAY ? `${every} on ${parts.BYDAY}` : every;
+}
+
+/** A percentage, or "no data" when Datadog hasn't computed one (e.g. a new or silent SLO). */
+export function formatPercent(value: number | null, digits = 2): string {
+    return value === null || !Number.isFinite(value) ? 'no data' : `${value.toFixed(digits)}%`;
 }
