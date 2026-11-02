@@ -41,6 +41,8 @@ export interface UrlFilters {
     view: 'monitors' | 'corrections';
     /** Datadog-style search query (free text and key:value terms). */
     q: string;
+    /** Ignore the embedding dashboard's template variables. */
+    ignoreDashboardVariables: boolean;
 }
 
 function readUrlFilters(): UrlFilters {
@@ -59,12 +61,14 @@ function readUrlFilters(): UrlFilters {
         withSlos: params.get('slos') === '1',
         view: params.get('view') === 'corrections' ? 'corrections' : 'monitors',
         q: params.get('q') ?? '',
+        ignoreDashboardVariables: params.get('tv') === 'off',
     };
 }
 
 function writeUrlFilters(filters: UrlFilters): void {
     const params = new URLSearchParams();
     if (filters.q.trim()) params.set('q', filters.q.trim());
+    if (filters.ignoreDashboardVariables) params.set('tv', 'off');
     if (filters.state !== 'all') params.set('state', filters.state);
     if (filters.window !== 'all') params.set('window', filters.window);
     filters.owners.forEach((owner) => params.append('owner', owner));

@@ -39,6 +39,11 @@ active downtimes, using live data from the Datadog org it runs in.
   that time against the SLO retroactively. A correction that hasn't started yet is deleted.
   Recurring corrections are edited in Datadog.
 - **Dashboard-friendly:** the layout adapts from full screen down to a small dashboard widget.
+  On a dashboard, the dashboard's **template variables** filter the monitors by tag, the way other
+  widgets apply them: `$env` with prefix `env` set to `prod` keeps monitors tagged `env:prod`.
+  A multi-value selection matches any of its values, and `*` means no filter. The active variables
+  appear under the search bar ("From dashboard: …"), combined with your own search. Use
+  **Ignore dashboard variables** to see every monitor in that widget.
 
 ## Permissions
 
