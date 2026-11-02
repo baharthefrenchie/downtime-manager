@@ -254,3 +254,55 @@ export function suggestionsFor(
     const seen = new Set<string>();
     return [...reserved, ...tagKeys].filter((s) => !seen.has(s.insert) && seen.add(s.insert)).slice(0, limit);
 }
+
+/** A dashboard template variable, as the `datadog.dashboard` input provides it. */
+export interface DashboardTemplateVariable {
+    name: string;
+    value: string;
+    values?: string[];
+    prefix?: string;
+    default?: string;
+}
+
+/** One active template-variable filter: the monitor needs `key:<any of values>`. */
+export interface TemplateVariableFilter {
+    name: string;
+    key: string;
+    values: string[];
+}
+
+/**
+ * Turns dashboard template variables into tag filters, the way dashboard widgets
+ * apply them: `prefix:value`, any of a multi-value selection. `*` or an empty
+ * selection means "no filter". A variable without a prefix applies only when its
+ * value is a full `key:value` tag.
+ */
+export function templateVariableFilters(variables: DashboardTemplateVariable[] | undefined): TemplateVariableFilter[] {
+    const filters: TemplateVariableFilter[] = [];
+    for (const variable of variables ?? []) {
+        const selected = (variable.values?.length ? variable.values : [variable.value])
+            .map((value) => (value ?? '').trim())
+            .filter(Boolean);
+        if (selected.length === 0 || selected.includes('*')) continue;
+        const prefix = variable.prefix?.trim();
+        if (prefix) {
+            filters.push({ name: variable.name, key: prefix.toLowerCase(), values: selected.map((v) => v.toLowerCase()) });
+            continue;
+        }
+        // No prefix: only full `key:value` selections can be mapped to monitor tags.
+        const byKey = new Map<string, string[]>();
+        selected.forEach((value) => {
+            const colon = value.indexOf(':');
+            if (colon <= 0) return;
+            const key = value.slice(0, colon).toLowerCase();
+            byKey.set(key, [...(byKey.get(key) ?? []), value.slice(colon + 1).toLowerCase()]);
+        });
+        byKey.forEach((values, key) => filters.push({ name: variable.name, key, values }));
+    }
+    return filters;
+}
+
+/** A monitor matches when, for every filter, it has the tag key with one of the selected values. */
+export function rowMatchesTemplateVariables(row: CoverageRow, filters: TemplateVariableFilter[]): boolean {
+    return filters.every((filter) => filter.values.some((value) => tagMatches(filter.key, value, row.monitor.tags)));
+}

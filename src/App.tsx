@@ -53,7 +53,9 @@ import { useCreatorNames } from './useCreatorNames';
 import type { CorrectionTarget } from './DowntimeModals';
 import { cancelSloCorrection, extendSloCorrection } from './slo.backend';
 import { SearchBar } from './SearchBar';
-import { parseQuery, rowMatchesQuery } from './search';
+import { parseQuery, rowMatchesQuery, rowMatchesTemplateVariables, templateVariableFilters } from './search';
+import { useDatadogAppInput } from '@datadog/apps-frontend/inputs/react';
+import { datadogDashboard } from '@datadog/apps-frontend/inputs/schema';
 import { SloCorrectionsView } from './SloCorrectionsView';
 import { correctionRowsFor, SLO_QUERY_KEY, useSloData, type CorrectionRow } from './useSloData';
 import {
@@ -200,12 +202,24 @@ function App() {
     }, [rows]);
 
     const parsedQuery = useMemo(() => parseQuery(filters.q), [filters.q]);
+
+    // When embedded in a dashboard, its template variables filter monitors by tag
+    // (prefix:value), like dashboard widgets. Outside a dashboard the input is
+    // unavailable and nothing changes.
+    const dashboardInput = useDatadogAppInput(datadogDashboard);
+    const dashboardVariables = dashboardInput.status === 'ready' ? dashboardInput.fields.dashboard.templateVariables : undefined;
+    const dashboardFilters = useMemo(() => templateVariableFilters(dashboardVariables), [dashboardVariables]);
+    const activeDashboardFilters = useMemo(
+        () => (filters.ignoreDashboardVariables ? [] : dashboardFilters),
+        [filters.ignoreDashboardVariables, dashboardFilters],
+    );
     const onQueryChange = useCallback((q: string) => setFilters({ q }), [setFilters]);
 
     const filteredRows = useMemo(
         () =>
             rows.filter((row) => {
                 if (!rowMatchesQuery(row, parsedQuery)) return false;
+                if (!rowMatchesTemplateVariables(row, activeDashboardFilters)) return false;
                 if (
                     filters.owners.length > 0 &&
                     !filters.owners.includes(row.owner) &&
@@ -227,6 +241,7 @@ function App() {
         [
             rows,
             parsedQuery,
+            activeDashboardFilters,
             filters.owners,
             filters.withSlos,
             relatedByMonitor,
@@ -784,6 +799,28 @@ function App() {
 
             <section className="surface toolbar" aria-label="Filters">
                 <SearchBar value={filters.q} rows={rows} onChange={onQueryChange} />
+                {dashboardFilters.length > 0 && (
+                    <div className="dashboard-filters" aria-label="Dashboard template variables">
+                        <Text size="xs" variant="secondary" weight="bold">
+                            From dashboard:
+                        </Text>
+                        {dashboardFilters.map((filter) => (
+                            <StatusPill
+                                key={`${filter.name}-${filter.key}`}
+                                isSoft
+                                level={filters.ignoreDashboardVariables ? 'default' : 'in-progress'}
+                                title={`Template variable $${filter.name}`}
+                            >
+                                {`${filter.key}:${filter.values.join(' OR ')}`}
+                            </StatusPill>
+                        ))}
+                        <Checkbox
+                            label="Ignore dashboard variables"
+                            isChecked={filters.ignoreDashboardVariables}
+                            onChange={(event) => setFilters({ ignoreDashboardVariables: event.target.checked })}
+                        />
+                    </div>
+                )}
                 <div className="toolbar-group">
                     {isNarrow ? (
                         <Select

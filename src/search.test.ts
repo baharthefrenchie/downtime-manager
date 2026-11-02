@@ -2,7 +2,14 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { buildCoverageRows, type LiveDowntime, type LiveMonitor } from './coverage.ts';
-import { parseQuery, rowMatchesQuery, suggestionsFor, tagIndex } from './search.ts';
+import {
+    parseQuery,
+    rowMatchesQuery,
+    rowMatchesTemplateVariables,
+    suggestionsFor,
+    tagIndex,
+    templateVariableFilters,
+} from './search.ts';
 
 const NOW = Date.parse('2026-11-01T12:00:00Z');
 
@@ -122,5 +129,33 @@ describe('search', () => {
         assert.deepEqual(values[0], ['env:prod', '2 monitors']);
         assert.deepEqual(suggestionsFor('-team:st', index, rows).map((s) => s.insert), ['-team:storage']);
         assert.deepEqual(suggestionsFor('status:al', index, rows).map((s) => s.insert), ['status:Alert']);
+    });
+});
+
+describe('dashboard template variables', () => {
+    const tvIds = (variables: Parameters<typeof templateVariableFilters>[0]) => {
+        const filters = templateVariableFilters(variables);
+        return rows.filter((row) => rowMatchesTemplateVariables(row, filters)).map((row) => row.monitor.id).sort();
+    };
+
+    it('applies prefix:value like dashboard widgets do', () => {
+        assert.deepEqual(tvIds([{ name: 'env', prefix: 'env', value: 'prod' }]), [1, 3]);
+        assert.deepEqual(tvIds([{ name: 'env', prefix: 'env', value: 'prod' }, { name: 'svc', prefix: 'service', value: 'db' }]), [3]);
+    });
+
+    it('matches any of a multi-value selection, and supports wildcards', () => {
+        assert.deepEqual(tvIds([{ name: 'team', prefix: 'team', value: 'payments', values: ['payments', 'storage'] }]), [1, 3]);
+        assert.deepEqual(tvIds([{ name: 'svc', prefix: 'service', value: 'web-*' }]), [1, 2]);
+    });
+
+    it('treats * or an empty selection as no filter', () => {
+        assert.deepEqual(tvIds([{ name: 'env', prefix: 'env', value: '*' }]), [1, 2, 3]);
+        assert.deepEqual(tvIds([{ name: 'env', prefix: 'env', value: '' }]), [1, 2, 3]);
+        assert.deepEqual(tvIds(undefined), [1, 2, 3]);
+    });
+
+    it('maps prefix-less variables only when the value is a full tag', () => {
+        assert.deepEqual(tvIds([{ name: 'scope', value: 'env:staging' }]), [2]);
+        assert.deepEqual(templateVariableFilters([{ name: 'free', value: 'prod' }]), []);
     });
 });

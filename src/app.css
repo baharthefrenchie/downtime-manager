@@ -267,3 +267,12 @@ body,
     clip: rect(0 0 0 0);
     white-space: nowrap;
 }
+
+/* Dashboard template variables applied as filters */
+.dashboard-filters {
+    display: flex;
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+}
