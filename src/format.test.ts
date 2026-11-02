@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { friendlyError, isDatadogUiOrigin, siteUiOrigin } from './format.ts';
+import { downtimeSetBy, endsLabel, friendlyError, isDatadogUiOrigin, mutedLabel, siteUiOrigin } from './format.ts';
 
 describe('isDatadogUiOrigin', () => {
     it('accepts Datadog UI hosts on every site, including custom org subdomains', () => {
@@ -72,5 +72,50 @@ describe('siteUiOrigin', () => {
         for (const site of ['evil.example.com', 'datadoghq.com.evil.example', 'a.b.datadoghq.com', '-x.datadoghq.com']) {
             assert.deepEqual(siteUiOrigin(site), { origin: 'https://app.datadoghq.com', isOrgSubdomain: false }, site);
         }
+    });
+});
+
+describe('plain-language table labels', () => {
+    const NOW = Date.parse('2026-11-01T12:00:00Z');
+    const H = 3_600_000;
+    const match = (overrides: Record<string, unknown> = {}) =>
+        ({
+            kind: 'direct',
+            coversAllGroups: true,
+            reason: '',
+            startMs: NOW - H,
+            endMs: NOW + 2 * H,
+            creatorLabel: 'Bo',
+            downtime: { id: 'd', scope: '*', isRecurring: false, monitorTags: [] },
+            ...overrides,
+        }) as unknown as Parameters<typeof endsLabel>[0];
+
+    it('colors an end time only within the hour, and an open end only after 30 days', () => {
+        assert.deepEqual(
+            [endsLabel(match(), NOW).tone, endsLabel(match({ endMs: NOW + 30 * 60_000 }), NOW).tone],
+            ['default', 'warning'],
+        );
+        assert.equal(endsLabel(match({ endMs: null, startMs: NOW - 2 * 24 * H }), NOW).tone, 'tertiary');
+        assert.equal(endsLabel(match({ endMs: null, startMs: NOW - 40 * 24 * H }), NOW).tone, 'warning');
+        assert.match(endsLabel(match({ endMs: null }), NOW).text, /^No end/);
+    });
+
+    it('describes what is muted and how', () => {
+        const row = (overrides: Record<string, unknown>) =>
+            ({ source: 'Direct (monitor ID)', matches: [match()], primary: match(), maintenanceState: 'Whole monitor', ...overrides }) as unknown as Parameters<typeof mutedLabel>[0];
+        assert.deepEqual(mutedLabel(row({})), { what: 'All groups', isScope: false, how: 'by monitor ID' });
+        const scoped = match({ kind: 'tag', coversAllGroups: false, downtime: { id: 'x', scope: 'host:a', monitorTags: ['env:prod'] } });
+        assert.deepEqual(mutedLabel(row({ source: 'Tag/Scope-based', primary: scoped, matches: [scoped, match()] })), {
+            what: 'host:a',
+            isScope: true,
+            how: 'by monitor tags · 2 downtimes',
+        });
+    });
+
+    it('names downtime creators only when they are not the owner', () => {
+        const row = (owner: string, downtimeCreators: string[]) => ({ owner, downtimeCreators }) as unknown as Parameters<typeof downtimeSetBy>[0];
+        assert.equal(downtimeSetBy(row('Bo', ['Bo (bo@x.io)'])), null);
+        assert.equal(downtimeSetBy(row('Bo', ['Resolving…'])), null);
+        assert.equal(downtimeSetBy(row('Bo', ['Al (al@x.io)'])), 'Downtime by Al (al@x.io)');
     });
 });

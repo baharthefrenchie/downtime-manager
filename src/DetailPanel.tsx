@@ -1,41 +1,36 @@
 import { useQuery } from '@tanstack/react-query';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 
 import { Button } from '@datadog/druids/form/Button';
 import { ClockIcon } from '@datadog/druids/icons/Clock';
+import { ExternalLinkIcon } from '@datadog/druids/icons/ExternalLink';
 import { TrashIcon } from '@datadog/druids/icons/Trash';
-import { Grid } from '@datadog/druids/layout/Grid';
-import { GridItem } from '@datadog/druids/layout/GridItem';
-import { HorizontalSeparator } from '@datadog/druids/layout/HorizontalSeparator';
 import { SidePanel } from '@datadog/druids/layout/SidePanel';
-import { Spacing } from '@datadog/druids/layout/Spacing';
 import { MessageBox } from '@datadog/druids/misc/MessageBox';
 import { StatusPill } from '@datadog/druids/pills/StatusPill';
 import { Text } from '@datadog/druids/typography/Text';
 
 import { lastChange } from './changeRecord';
-import { windowStateOf, type CoverageRow, type DatadogDowntimeMatch, type DowntimeMatch } from './coverage';
+import type { CoverageRow, DatadogDowntimeMatch, DowntimeMatch } from './coverage';
 import {
     cancelBlockedReason,
     correctionStateLevel,
     correctionTiming,
     downtimeUrl,
+    endsLabel,
     extendBlockedReason,
+    formatDuration,
     formatEnd,
-    formatRelative,
     formatPercent,
+    formatRelative,
     formatStart,
     friendlyError,
-    MAINTENANCE_HINTS,
-    maintenanceLevel,
-    matchKindLabel,
+    matchHowLabel,
     monitorStateLevel,
     monitorUrl,
     mutedScopeLabel,
     sloTypeLabel,
     sloUrl,
-    windowDetail,
-    windowLevel,
 } from './format';
 import type { Density } from './hooks';
 import type { CorrectionTarget } from './DowntimeModals';
@@ -47,57 +42,38 @@ import {
     type RelatedSlo,
 } from './slo';
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+/** One label/value pair in a details list. */
+function Detail({ label, children, isWide = false }: { label: string; children: ReactNode; isWide?: boolean }) {
     return (
-        <GridItem>
-            <Text as="div" size="xs" variant="tertiary" weight="bold" textTransform="uppercase" marginBottom="xxs">
+        <div className={`detail${isWide ? ' detail--wide' : ''}`}>
+            <Text as="dt" size="xs" variant="secondary">
                 {label}
             </Text>
-            {children}
-        </GridItem>
+            <dd>{children}</dd>
+        </div>
     );
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function SectionTitle({ children, aside }: { children: ReactNode; aside?: ReactNode }) {
     return (
-        <Spacing as="section" paddingY="md">
-            <Text as="h3" size="md" weight="bold" marginBottom="sm">
-                {title}
+        <div className="panel-section-title">
+            <Text as="h3" size="md" weight="bold">
+                {children}
             </Text>
-            {children}
-        </Spacing>
+            {aside}
+        </div>
     );
 }
 
-/**
- * What Datadog itself says about this monitor. Uses Datadog's muted-monitor list
- * from the snapshot, so it needs no extra request.
- */
-function DatadogStatus({ row }: { row: CoverageRow }) {
-    if (row.maintenanceState === 'Not muting') {
-        return (
-            <MessageBox level="warning" title="Not muting anything right now">
-                Datadog doesn't report this monitor as muted: its downtimes don't match any current group.
-            </MessageBox>
-        );
-    }
-    const fromOutsideList = row.matches.some((match) => match.downtime.fromDatadogMatch);
-    return (
-        <MessageBox level="success">
-            Datadog reports this monitor as muted.
-            {fromOutsideList && ' Its downtimes come from outside the downtime list, such as host auto-mutes.'}
-        </MessageBox>
-    );
+/** Short label for a downtime in the switcher: what it mutes, then when it ends. */
+function switcherLabel(match: DowntimeMatch, nowMs: number): string {
+    // The end comes first: long scopes often share a prefix, and the end is what tells them apart.
+    const what = mutedScopeLabel(match);
+    const ends = match.endMs === null ? 'No end' : `Ends ${formatRelative(match.endMs, nowMs)}`;
+    return `${ends} · ${what.length > 40 ? `…${what.slice(-39)}` : what}`;
 }
 
 const SWITCHER_LIMIT = 6;
-
-/** Short label for a downtime in the switcher: what it targets, then when it ends. */
-function switcherLabel(match: DowntimeMatch): string {
-    const scope = match.downtime.scope?.trim();
-    const target = match.kind === 'direct' ? 'Monitor ID' : scope && scope !== '*' ? scope : matchKindLabel(match);
-    return `${target.length > 42 ? `${target.slice(0, 41)}…` : target} · ${match.endMs === null ? 'no end' : formatEnd(match.endMs)}`;
-}
 
 interface DetailPanelProps {
     row: CoverageRow | null;
@@ -115,6 +91,67 @@ interface DetailPanelProps {
     onCancelCorrection: (target: CorrectionTarget) => void;
 }
 
+function CorrectionItem({
+    view,
+    sloName,
+    nowMs,
+    onExtend,
+    onCancel,
+}: {
+    view: CorrectionView;
+    sloName: string;
+    nowMs: number;
+    onExtend: (target: CorrectionTarget) => void;
+    onCancel: (target: CorrectionTarget) => void;
+}) {
+    const target = { view, sloName };
+    const extendBlocked = correctionExtendBlockedReason(view);
+    const cancelBlocked = correctionCancelBlockedReason(view);
+    const isRecurring = view.state === 'Recurring';
+    return (
+        <div className="slo-correction">
+            <div className="slo-correction-head">
+                <StatusPill isSoft level={correctionStateLevel(view.state)}>
+                    {view.state}
+                </StatusPill>
+                <Text size="sm" hasEllipsis>
+                    {view.correction.category}
+                    {view.correction.description ? ` · ${view.correction.description}` : ''}
+                </Text>
+            </div>
+            <Text as="div" size="xs" variant="tertiary">
+                {correctionTiming(view, nowMs)}
+                {!isRecurring && ` · ${formatStart(view.startMs)} → ${formatEnd(view.endMs)}`}
+                {view.correction.sloQuery ? ` · on every SLO matching ${view.correction.sloQuery}` : ''}
+            </Text>
+            {isRecurring ? (
+                <Text as="div" size="xs" variant="tertiary">
+                    Recurring corrections are edited in Datadog.
+                </Text>
+            ) : (
+                <div className="panel-actions">
+                    <Button
+                        size="sm"
+                        icon={ClockIcon}
+                        label="Extend"
+                        isDisabled={Boolean(extendBlocked)}
+                        tooltip={extendBlocked ?? undefined}
+                        onClick={() => onExtend(target)}
+                    />
+                    <Button
+                        size="sm"
+                        level="danger"
+                        label={view.state === 'Scheduled' ? 'Delete' : 'End now'}
+                        isDisabled={Boolean(cancelBlocked)}
+                        tooltip={cancelBlocked ?? undefined}
+                        onClick={() => onCancel(target)}
+                    />
+                </div>
+            )}
+        </div>
+    );
+}
+
 function RelatedSlosSection({
     relatedSlos,
     correctionsBySlo,
@@ -127,9 +164,8 @@ function RelatedSlosSection({
     }
     if (relatedSlos.length === 0) {
         return (
-            <Text variant="tertiary">
-                No monitor-based SLO uses this monitor, and no count-based or time-slice SLO carries the scope or tags
-                of the downtime that covers it.
+            <Text as="p" size="sm" variant="tertiary">
+                No SLO uses this monitor or matches its downtime&apos;s tags.
             </Text>
         );
     }
@@ -137,66 +173,32 @@ function RelatedSlosSection({
         <div className="slo-list">
             {relatedSlos.map(({ slo, relation, matchedTags }) => {
                 const corrections = correctionsBySlo.get(slo.id) ?? [];
+                const why = relation === 'Monitor-based SLO' ? 'uses this monitor' : `matches ${matchedTags.join(', ') || 'the downtime'}`;
                 return (
                     <div key={slo.id} className="slo-item">
-                        <div className="slo-item-head">
-                            <Button isNaked isTitleCased={false} hasEllipsisWithTooltip href={sloUrl(slo.id)} isExternal label={slo.name} />
-                            <StatusPill isSoft level={relation === 'Monitor-based SLO' ? 'success' : 'default'}>
-                                {relation}
-                            </StatusPill>
-                        </div>
+                        <Button
+                            isNaked
+                            isTitleCased={false}
+                            hasEllipsisWithTooltip
+                            href={sloUrl(slo.id)}
+                            isExternal
+                            label={slo.name}
+                        />
                         <Text as="div" size="xs" variant="tertiary">
-                            {sloTypeLabel(slo.type)} SLO · SLI {formatPercent(slo.sli)}
-                            {slo.target !== null ? ` (target ${slo.target}%)` : ''} · error budget{' '}
-                            {formatPercent(slo.errorBudgetRemaining, 1)}
-                            {slo.timeframe ? ` · ${slo.timeframe}` : ''}
-                            {matchedTags.length > 0 ? ` · tags ${matchedTags.join(', ')}` : ''}
+                            {sloTypeLabel(slo.type)} · SLI {formatPercent(slo.sli)}
+                            {slo.target !== null ? ` (target ${slo.target}%)` : ''} · {formatPercent(slo.errorBudgetRemaining, 1)} budget
+                            left{slo.timeframe ? ` · ${slo.timeframe}` : ''} · {why}
                         </Text>
-                        {corrections.length === 0 ? (
-                            <Text as="div" size="xs" variant="tertiary" marginTop="xxs">
-                                No current corrections.
-                            </Text>
-                        ) : (
-                            corrections.map((view) => {
-                                const extendBlocked = correctionExtendBlockedReason(view);
-                                const cancelBlocked = correctionCancelBlockedReason(view);
-                                const target = { view, sloName: slo.name };
-                                return (
-                                    <div key={view.correction.id} className="slo-correction">
-                                        <div className="slo-item-head">
-                                            <StatusPill level={correctionStateLevel(view.state)}>{view.state}</StatusPill>
-                                            <Text size="sm">{view.correction.category}</Text>
-                                        </div>
-                                        <Text as="div" size="xs" variant="tertiary">
-                                            {correctionTiming(view, nowMs)}
-                                            {view.state !== 'Recurring' &&
-                                                ` · ${formatStart(view.startMs)} → ${formatEnd(view.endMs)}`}
-                                            {view.correction.description ? ` · ${view.correction.description}` : ''}
-                                            {view.correction.sloQuery ? ` · applies to SLOs matching ${view.correction.sloQuery}` : ''}
-                                        </Text>
-                                        <div className="panel-actions">
-                                            <Button
-                                                size="sm"
-                                                icon={ClockIcon}
-                                                label="Extend"
-                                                isDisabled={Boolean(extendBlocked)}
-                                                tooltip={extendBlocked ?? undefined}
-                                                onClick={() => onExtendCorrection(target)}
-                                            />
-                                            <Button
-                                                size="sm"
-                                                level="danger"
-                                                icon={TrashIcon}
-                                                label={view.state === 'Scheduled' ? 'Delete' : 'End now'}
-                                                isDisabled={Boolean(cancelBlocked)}
-                                                tooltip={cancelBlocked ?? undefined}
-                                                onClick={() => onCancelCorrection(target)}
-                                            />
-                                        </div>
-                                    </div>
-                                );
-                            })
-                        )}
+                        {corrections.map((view) => (
+                            <CorrectionItem
+                                key={view.correction.id}
+                                view={view}
+                                sloName={slo.name}
+                                nowMs={nowMs}
+                                onExtend={onExtendCorrection}
+                                onCancel={onCancelCorrection}
+                            />
+                        ))}
                     </div>
                 );
             })}
@@ -204,7 +206,7 @@ function RelatedSlosSection({
     );
 }
 
-/** Datadog-style side panel with the selected monitor's active downtime details. */
+/** Side panel for one monitor: what is muted, until when, what to do about it, and the SLOs it touches. */
 export function DetailPanel({
     row,
     nowMs,
@@ -220,8 +222,10 @@ export function DetailPanel({
 }: DetailPanelProps) {
     const [selectedId, setSelectedId] = useState<string | null>(row ? row.primary.downtime.id : null);
     const [showAllDowntimes, setShowAllDowntimes] = useState(false);
+    const [showTechnical, setShowTechnical] = useState(false);
     const match = row?.matches.find((m) => m.downtime.id === selectedId) ?? row?.primary ?? null;
     const isPlaceholder = Boolean(match?.downtime.isPlaceholder);
+    const isLoading = Boolean(match?.downtime.isLoading);
     const downtimeId = match && !isPlaceholder ? match.downtime.id : null;
 
     // Monitors muted by downtimes outside the downtime list (e.g. host auto-mutes): ask Datadog
@@ -230,7 +234,7 @@ export function DetailPanel({
     const datadogMatchesQuery = useQuery({
         queryKey: ['datadog-matches', monitorId],
         queryFn: () => fetchDatadogMatches(monitorId),
-        enabled: isPlaceholder && monitorId > 0,
+        enabled: isPlaceholder && !isLoading && monitorId > 0,
         staleTime: 5 * 60_000,
     });
     useEffect(() => {
@@ -243,209 +247,208 @@ export function DetailPanel({
         enabled: Boolean(downtimeId),
     });
 
-    const columns = density === 'narrow' ? 1 : 2;
     const raw = detailQuery.data;
     // The app's own record of who last extended or cancelled this downtime (Audit Trail shows the app's account).
     const change = lastChange(raw?.message ?? match?.downtime.message);
+    const monitorLink = row ? monitorUrl(row.monitor.id) : null;
+    const scope = (raw?.scope ?? match?.downtime.scope ?? '').trim();
+    const message = (raw?.message ?? match?.downtime.message)?.trim();
+    const what = match ? mutedScopeLabel(match) : '';
+    const ends = match ? endsLabel(match, nowMs) : null;
+    const extendBlocked = match ? extendBlockedReason(match) : null;
+    const cancelBlocked = match ? cancelBlockedReason(match) : null;
 
     return (
         <SidePanel
             isOpen={Boolean(row && match)}
             isPortalized
             hasTransition
-            width={density === 'narrow' ? '100vw' : 'min(600px, 92vw)'}
+            width={density === 'narrow' ? '100vw' : 'min(560px, 92vw)'}
             onClose={onClose}
         >
             {row && match && (
-                <Spacing as="div" padding="lg">
-                    <Text as="div" size="xs" variant="tertiary" weight="bold" textTransform="uppercase">
-                        Active downtime
-                    </Text>
-                    <Text as="h2" size="lg" weight="bold" marginBottom="xs">
-                        {row.monitor.name}
-                    </Text>
-                    <div className="panel-actions">
-                        {monitorUrl(row.monitor.id) && (
-                            <Button size="sm" href={monitorUrl(row.monitor.id) ?? undefined} isExternal label="Open monitor" />
-                        )}
-                        {!isPlaceholder && (
-                            <Button
-                                size="sm"
-                                href={downtimeUrl(match.downtime.id)}
-                                isExternal
-                                label="Open downtime"
-                            />
-                        )}
-                        <Button
-                            size="sm"
-                            icon={ClockIcon}
-                            label="Extend"
-                            isDisabled={Boolean(extendBlockedReason(match))}
-                            tooltip={extendBlockedReason(match) ?? undefined}
-                            onClick={() => onExtend(row, match)}
-                        />
-                        <Button
-                            size="sm"
-                            level="danger"
-                            icon={TrashIcon}
-                            label="Cancel downtime"
-                            isDisabled={Boolean(cancelBlockedReason(match))}
-                            tooltip={cancelBlockedReason(match) ?? undefined}
-                            onClick={() => onCancel(row, match)}
-                        />
+                <div className="panel">
+                    {/* Monitor */}
+                    <div className="panel-head">
+                        <Text as="h2" size="lg" weight="bold">
+                            {row.monitor.name}
+                        </Text>
+                        <div className="panel-meta">
+                            <StatusPill level={monitorStateLevel(row.monitor.overallState)}>{row.monitor.overallState}</StatusPill>
+                            <Text size="sm" variant="secondary">
+                                {row.monitor.type} · owned by {row.owner}
+                            </Text>
+                            {monitorLink && (
+                                <Button size="sm" isNaked icon={ExternalLinkIcon} href={monitorLink} isExternal label="Open monitor" />
+                            )}
+                        </div>
                     </div>
 
-                    <Section title="Monitor">
-                        <Grid columns={columns} gap="md">
-                            <Field label="Monitor ID">
-                                <Text isMonospace>{row.monitor.id}</Text>
-                            </Field>
-                            <Field label="Monitor type">
-                                <Text>{row.monitor.type}</Text>
-                            </Field>
-                            <Field label="Monitor state">
-                                <StatusPill level={monitorStateLevel(row.monitor.overallState)}>
-                                    {row.monitor.overallState}
-                                </StatusPill>
-                            </Field>
-                            <Field label="Owner">
-                                <Text>{row.owner}</Text>
-                            </Field>
-                        </Grid>
-                    </Section>
-                    <HorizontalSeparator />
+                    {row.maintenanceState === 'Not muting' && (
+                        <MessageBox level="warning" title="Not muting anything right now">
+                            Datadog doesn&apos;t report this monitor as muted: its downtimes don&apos;t match any of its current
+                            groups.
+                        </MessageBox>
+                    )}
+                    {isPlaceholder && !isLoading && (
+                        datadogMatchesQuery.isError ? (
+                            <MessageBox level="warning" title="Couldn't load this monitor's downtimes">
+                                {friendlyError(datadogMatchesQuery.error, 'read downtimes')}
+                            </MessageBox>
+                        ) : datadogMatchesQuery.data && datadogMatchesQuery.data.length === 0 ? (
+                            <MessageBox level="warning">
+                                Datadog no longer applies a downtime to this monitor. Refresh to update the table.
+                            </MessageBox>
+                        ) : (
+                            <MessageBox>
+                                Muted by a downtime outside the downtime list (for example a host auto-mute). Loading it from
+                                Datadog…
+                            </MessageBox>
+                        )
+                    )}
 
-                    <Section title="Downtime">
-                        {isPlaceholder && (
-                            <Spacing as="div" marginBottom="md">
-                                {datadogMatchesQuery.isError ? (
-                                    <MessageBox level="warning" title="Couldn't load this monitor's downtimes">
-                                        {friendlyError(datadogMatchesQuery.error, 'read downtimes')}
-                                    </MessageBox>
-                                ) : datadogMatchesQuery.data && datadogMatchesQuery.data.length === 0 ? (
-                                    <MessageBox level="warning">
-                                        Datadog no longer applies a downtime to this monitor. Refresh to update the table.
-                                    </MessageBox>
-                                ) : (
-                                    <MessageBox>
-                                        This monitor is muted by a downtime outside the downtime list (for example a host
-                                        auto-mute). Loading it from Datadog…
-                                    </MessageBox>
-                                )}
-                            </Spacing>
-                        )}
+                    {/* Downtime */}
+                    <section className="panel-section" aria-label="Downtime">
+                        <SectionTitle
+                            aside={
+                                row.matches.length > 1 && (
+                                    <Text size="sm" variant="secondary">
+                                        {row.matches.length >= 100 ? '100+' : row.matches.length} downtimes mute this monitor
+                                    </Text>
+                                )
+                            }
+                        >
+                            Downtime
+                        </SectionTitle>
                         {row.matches.length > 1 && (
-                            <Spacing as="div" marginBottom="md">
-                                <Text as="div" size="sm" variant="secondary" marginBottom="xs">
-                                    {row.matches.length >= 100 ? '100+' : row.matches.length} active downtimes cover this
-                                    monitor:
+                            <div className="panel-actions downtime-switcher">
+                                {(showAllDowntimes ? row.matches : row.matches.slice(0, SWITCHER_LIMIT)).map((m) => (
+                                    <Button
+                                        key={m.downtime.id}
+                                        size="sm"
+                                        isActive={m.downtime.id === match.downtime.id}
+                                        hasEllipsisWithTooltip
+                                        isTitleCased={false}
+                                        label={switcherLabel(m, nowMs)}
+                                        onClick={() => setSelectedId(m.downtime.id)}
+                                    />
+                                ))}
+                                {row.matches.length > SWITCHER_LIMIT && (
+                                    <Button
+                                        size="sm"
+                                        isNaked
+                                        label={showAllDowntimes ? 'Show fewer' : `Show all ${row.matches.length}`}
+                                        onClick={() => setShowAllDowntimes((value) => !value)}
+                                    />
+                                )}
+                            </div>
+                        )}
+
+                        {isLoading ? (
+                            <Text variant="tertiary">Loading downtimes…</Text>
+                        ) : (
+                            <div className="downtime-card">
+                                <Text as="div" size="md" weight="bold" className="downtime-headline">
+                                    {isPlaceholder ? (
+                                        'Muting some groups'
+                                    ) : what === 'All groups' ? (
+                                        'Muting all groups'
+                                    ) : (
+                                        <>
+                                            Muting <code className="inline-code">{what}</code>
+                                        </>
+                                    )}
                                 </Text>
+                                {ends && !isPlaceholder && (
+                                    <Text as="div" size="sm" variant="secondary">
+                                        {matchHowLabel(match)}
+                                        {match.startMs !== null && ` · started ${formatRelative(match.startMs, nowMs)}`}
+                                        {' · '}
+                                        <Text as="span" size="sm" variant={ends.tone === 'tertiary' ? 'secondary' : ends.tone}>
+                                            {match.endMs === null
+                                                ? 'no end, runs until canceled'
+                                                : `ends ${formatRelative(match.endMs, nowMs)} (${formatEnd(match.endMs)})`}
+                                        </Text>
+                                    </Text>
+                                )}
                                 <div className="panel-actions">
-                                    {(showAllDowntimes ? row.matches : row.matches.slice(0, SWITCHER_LIMIT)).map((m) => (
-                                        <Button
-                                            key={m.downtime.id}
-                                            size="sm"
-                                            isActive={m.downtime.id === match.downtime.id}
-                                            hasEllipsisWithTooltip
-                                            isTitleCased={false}
-                                            label={switcherLabel(m)}
-                                            onClick={() => setSelectedId(m.downtime.id)}
-                                        />
-                                    ))}
-                                    {row.matches.length > SWITCHER_LIMIT && (
+                                    <Button
+                                        size="sm"
+                                        level="featured"
+                                        icon={ClockIcon}
+                                        label="Extend"
+                                        isDisabled={Boolean(extendBlocked)}
+                                        tooltip={extendBlocked ?? undefined}
+                                        onClick={() => onExtend(row, match)}
+                                    />
+                                    <Button
+                                        size="sm"
+                                        level="danger"
+                                        icon={TrashIcon}
+                                        label="Cancel downtime"
+                                        isDisabled={Boolean(cancelBlocked)}
+                                        tooltip={cancelBlocked ?? undefined}
+                                        onClick={() => onCancel(row, match)}
+                                    />
+                                    {!isPlaceholder && (
                                         <Button
                                             size="sm"
                                             isNaked
-                                            label={showAllDowntimes ? 'Show fewer' : `Show all ${row.matches.length}`}
-                                            onClick={() => setShowAllDowntimes((value) => !value)}
+                                            icon={ExternalLinkIcon}
+                                            href={downtimeUrl(match.downtime.id)}
+                                            isExternal
+                                            label="Open downtime"
                                         />
                                     )}
                                 </div>
-                            </Spacing>
+                            </div>
                         )}
-                        <Grid columns={columns} gap="md">
-                            <Field label="Coverage">
-                                <StatusPill isSoft level={match.kind === 'direct' ? 'success' : 'default'}>
-                                    {matchKindLabel(match)}
-                                </StatusPill>
-                                <Text as="div" size="xs" variant="tertiary" marginTop="xxs">
-                                    {match.reason}
-                                </Text>
-                            </Field>
-                            <Field label="What is muted">
-                                <StatusPill level={maintenanceLevel(row)} title={MAINTENANCE_HINTS[row.maintenanceState]}>
-                                    {row.maintenanceState}
-                                </StatusPill>
-                                <Text as="div" size="xs" variant="tertiary" isMonospace marginTop="xxs">
-                                    {mutedScopeLabel(match)}
-                                </Text>
-                            </Field>
-                            <Field label="Window">
-                                <StatusPill level={windowLevel(windowStateOf(match, nowMs))}>
-                                    {windowStateOf(match, nowMs)}
-                                </StatusPill>
-                                <Text as="div" size="xs" variant="tertiary" marginTop="xxs">
-                                    {windowDetail(match, windowStateOf(match, nowMs), nowMs)}
-                                </Text>
-                            </Field>
-                            <Field label="Downtime ID">
-                                <Text isMonospace size="sm">
-                                    {match.downtime.id}
-                                </Text>
-                            </Field>
-                            <Field label="Start">
-                                <Text>{formatStart(match.startMs)}</Text>
-                                <Text as="div" size="xs" variant="tertiary">
-                                    {formatRelative(match.startMs, nowMs) ?? ''}
-                                </Text>
-                            </Field>
-                            <Field label="End">
-                                <Text variant={match.endMs === null ? 'warning' : 'default'}>{formatEnd(match.endMs)}</Text>
-                                <Text as="div" size="xs" variant="tertiary">
-                                    {formatRelative(match.endMs, nowMs) ?? 'Runs until canceled'}
-                                </Text>
-                            </Field>
-                            <Field label="Timezone">
-                                <Text>{raw?.display_timezone ?? match.downtime.displayTimezone ?? 'UTC'}</Text>
-                            </Field>
-                            <Field label="Created by">
-                                <Text>{match.creatorLabel}</Text>
-                            </Field>
-                            {change && (
-                                <Field label="Last changed by">
-                                    <Text as="div">{change.by}</Text>
-                                    <Text as="div" size="xs" variant="tertiary">
-                                        {change.action === 'Extended'
-                                            ? `Extended${change.end ? ` to ${formatEnd(Date.parse(change.end))}` : ''}`
-                                            : 'Cancelled'}{' '}
-                                        via Downtime Manager, {formatStart(Date.parse(change.at))}
-                                    </Text>
-                                </Field>
-                            )}
-                            <GridItem colSpan="all">
-                                <Text as="div" size="xs" variant="tertiary" weight="bold" textTransform="uppercase" marginBottom="xxs">
-                                    Scope
-                                </Text>
-                                <Text isMonospace size="sm" overflowWrap="anywhere">
-                                    {raw?.scope ?? match.downtime.scope ?? '*'}
-                                </Text>
-                            </GridItem>
-                            <GridItem colSpan="all">
-                                <Text as="div" size="xs" variant="tertiary" weight="bold" textTransform="uppercase" marginBottom="xxs">
-                                    Message
-                                </Text>
-                                <Text as="p" whiteSpace="pre-wrap" overflowWrap="anywhere">
-                                    {(raw?.message ?? match.downtime.message)?.trim() || 'No message'}
-                                </Text>
-                            </GridItem>
-                        </Grid>
-                        <Spacing as="div" marginTop="md">
-                            <DatadogStatus row={row} />
-                        </Spacing>
-                    </Section>
-                    <HorizontalSeparator />
 
-                    <Section title={`Related SLOs${relatedSlos?.length ? ` (${relatedSlos.length})` : ''}`}>
+                        {!isPlaceholder && (
+                            <dl className="details">
+                                <Detail label="Started">
+                                    <Text size="sm">{formatStart(match.startMs)}</Text>
+                                </Detail>
+                                <Detail label="Ends">
+                                    <Text size="sm">{match.endMs === null ? 'No end' : formatEnd(match.endMs)}</Text>
+                                </Detail>
+                                <Detail label="Created by">
+                                    <Text size="sm">{match.creatorLabel}</Text>
+                                </Detail>
+                                <Detail label="Timezone">
+                                    <Text size="sm">{raw?.display_timezone ?? match.downtime.displayTimezone ?? 'UTC'}</Text>
+                                </Detail>
+                                {change && (
+                                    <Detail label="Last changed" isWide>
+                                        <Text size="sm">
+                                            {change.action === 'Extended'
+                                                ? `Extended${change.end ? ` to ${formatEnd(Date.parse(change.end))}` : ''}`
+                                                : 'Cancelled'}{' '}
+                                            by {change.by}, {formatStart(Date.parse(change.at))}
+                                        </Text>
+                                    </Detail>
+                                )}
+                                {scope && scope !== '*' && scope !== what && (
+                                    <Detail label="Scope" isWide>
+                                        <Text size="sm" isMonospace overflowWrap="anywhere">
+                                            {scope}
+                                        </Text>
+                                    </Detail>
+                                )}
+                                {message && (
+                                    <Detail label="Message" isWide>
+                                        <Text as="p" size="sm" whiteSpace="pre-wrap" overflowWrap="anywhere">
+                                            {message}
+                                        </Text>
+                                    </Detail>
+                                )}
+                            </dl>
+                        )}
+                    </section>
+
+                    {/* SLOs */}
+                    <section className="panel-section" aria-label="Related SLOs">
+                        <SectionTitle>{`Related SLOs${relatedSlos?.length ? ` (${relatedSlos.length})` : ''}`}</SectionTitle>
                         <RelatedSlosSection
                             relatedSlos={relatedSlos}
                             correctionsBySlo={correctionsBySlo}
@@ -453,23 +456,68 @@ export function DetailPanel({
                             onExtendCorrection={onExtendCorrection}
                             onCancelCorrection={onCancelCorrection}
                         />
-                    </Section>
-                    <HorizontalSeparator />
+                    </section>
 
-                    <Section title="Raw JSON (get downtime)">
-                        {detailQuery.isLoading && <Text variant="tertiary">Loading live downtime…</Text>}
-                        {detailQuery.isError && (
-                            <MessageBox level="danger" title="Unable to load downtime">
-                                {friendlyError(detailQuery.error, 'read downtimes')}
-                            </MessageBox>
-                        )}
-                        {raw && (
-                            <Text as="pre" isMonospace size="xs" className="raw-json">
-                                {JSON.stringify(raw, null, 2)}
-                            </Text>
-                        )}
-                    </Section>
-                </Spacing>
+                    {/* Technical details, folded away */}
+                    {!isLoading && (
+                        <section className="panel-section panel-section--quiet" aria-label="Technical details">
+                            <Button
+                                size="sm"
+                                isNaked
+                                isTitleCased={false}
+                                label={showTechnical ? 'Hide technical details' : 'Show technical details'}
+                                onClick={() => setShowTechnical((value) => !value)}
+                            />
+                            {showTechnical && (
+                                <>
+                                    <dl className="details">
+                                        <Detail label="Monitor ID">
+                                            <Text size="sm" isMonospace>
+                                                {row.monitor.id}
+                                            </Text>
+                                        </Detail>
+                                        {!isPlaceholder && (
+                                            <Detail label="Downtime ID">
+                                                <Text size="sm" isMonospace overflowWrap="anywhere">
+                                                    {match.downtime.id}
+                                                </Text>
+                                            </Detail>
+                                        )}
+                                        <Detail label="Why it matches" isWide>
+                                            <Text size="sm">{match.reason}</Text>
+                                        </Detail>
+                                        {match.startMs !== null && match.endMs !== null && (
+                                            <Detail label="Length">
+                                                <Text size="sm">{formatDuration(match.endMs - match.startMs)}</Text>
+                                            </Detail>
+                                        )}
+                                        <Detail label="Datadog says">
+                                            <Text size="sm">{row.maintenanceState === 'Not muting' ? 'Not muted' : 'Muted'}</Text>
+                                        </Detail>
+                                    </dl>
+                                    {!isPlaceholder && (
+                                        <>
+                                            <Text as="div" size="xs" variant="secondary" marginBottom="xxs">
+                                                Get-downtime response
+                                            </Text>
+                                            {detailQuery.isLoading && <Text variant="tertiary">Loading live downtime…</Text>}
+                                            {detailQuery.isError && (
+                                                <MessageBox level="danger" title="Couldn't load the downtime">
+                                                    {friendlyError(detailQuery.error, 'read downtimes')}
+                                                </MessageBox>
+                                            )}
+                                            {raw && (
+                                                <Text as="pre" isMonospace size="xs" className="raw-json">
+                                                    {JSON.stringify(raw, null, 2)}
+                                                </Text>
+                                            )}
+                                        </>
+                                    )}
+                                </>
+                            )}
+                        </section>
+                    )}
+                </div>
             )}
         </SidePanel>
     );
