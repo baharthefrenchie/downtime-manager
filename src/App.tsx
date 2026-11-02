@@ -58,13 +58,12 @@ import {
 
 // Loaded on first use (and prefetched once the table is on screen) to keep the
 // initial bundle small: nobody needs these to see which monitors are muted.
-const loadDetailPanel = () => import('./DetailPanel');
-const loadModals = () => import('./DowntimeModals');
-const loadDateRangePicker = () => import('@datadog/druids/time/DateRangePicker');
-const DetailPanel = lazy(() => loadDetailPanel().then((m) => ({ default: m.DetailPanel })));
-const CancelDowntimeModal = lazy(() => loadModals().then((m) => ({ default: m.CancelDowntimeModal })));
-const ExtendDowntimeModal = lazy(() => loadModals().then((m) => ({ default: m.ExtendDowntimeModal })));
-const DateRangePicker = lazy(() => loadDateRangePicker().then((m) => ({ default: m.DateRangePicker })));
+const loadLazyParts = () => import('./LazyParts');
+const loadDateFilter = () => import('./DateFilter');
+const DetailPanel = lazy(() => loadLazyParts().then((m) => ({ default: m.DetailPanel })));
+const CancelDowntimeModal = lazy(() => loadLazyParts().then((m) => ({ default: m.CancelDowntimeModal })));
+const ExtendDowntimeModal = lazy(() => loadLazyParts().then((m) => ({ default: m.ExtendDowntimeModal })));
+const DateFilter = lazy(() => loadDateFilter().then((m) => ({ default: m.DateFilter })));
 
 const DEFAULT_PAGE_SIZE = 25;
 const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
@@ -232,9 +231,8 @@ function App() {
     const hasData = Boolean(snapshot);
     useEffect(() => {
         if (!hasData) return;
-        void loadDetailPanel();
-        void loadModals();
-        void loadDateRangePicker();
+        void loadLazyParts();
+        void loadDateFilter();
     }, [hasData]);
 
     // ---- Detail panel (selected monitor lives in the URL as ?monitor=) ----
@@ -695,13 +693,10 @@ function App() {
                     />
                     {isDateFilterEnabled && (
                         <Suspense fallback={null}>
-                            <DateRangePicker
-                                canPickFutureDates
-                                hasRewind={false}
-                                hasPlay={false}
-                                hasForward={false}
-                                timeFrame={{ start: rangeStart, end: rangeEnd, paused: true }}
-                                setTimeFrame={(timeFrame) => setFilters({ from: timeFrame.start, to: timeFrame.end })}
+                            <DateFilter
+                                start={rangeStart}
+                                end={rangeEnd}
+                                onChange={(range) => setFilters({ from: range.start, to: range.end })}
                             />
                         </Suspense>
                     )}

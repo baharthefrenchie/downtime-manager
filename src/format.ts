@@ -1,27 +1,69 @@
-import datadogAppConfig from '../datadog-app.config.json';
 import type { CoverageRow, DowntimeMatch, WindowState } from './coverage';
 
 type PillLevel = 'default' | 'success' | 'warning' | 'danger' | 'in-progress';
 
-function appBaseUrl(): string {
-    const site = (datadogAppConfig.datadogSite || 'datadoghq.com').replace(/^https?:\/\//, '').replace(/\/$/, '');
+/** True when the app runs inside a frame (the Datadog UI); errors on cross-origin access mean yes. */
+export function isEmbeddedInFrame(): boolean {
+    try {
+        return window.self !== window.top;
+    } catch {
+        return true;
+    }
+}
+
+// Datadog UI hosts: app.datadoghq.com, us3/us5/ap1/ap2 sites, custom org subdomains
+// (e.g. demo.datadoghq.com), datadoghq.eu and the US1-FED site.
+const DATADOG_UI_ORIGIN = /^https:\/\/([a-z0-9-]+\.)+(datadoghq\.com|datadoghq\.eu|ddog-gov\.com)$/;
+
+/** True for origins of the Datadog web UI (and nothing that merely contains a Datadog domain). */
+export function isDatadogUiOrigin(origin: string): boolean {
+    return DATADOG_UI_ORIGIN.test(origin);
+}
+
+/** Origin of the Datadog page embedding this app, if it's a Datadog UI host. */
+function embeddingDatadogOrigin(): string | null {
+    if (!isEmbeddedInFrame()) return null;
+    const candidates: string[] = [];
+    try {
+        const ancestors = window.location.ancestorOrigins;
+        if (ancestors && ancestors.length > 0) candidates.push(ancestors[ancestors.length - 1]);
+    } catch {
+        // ancestorOrigins isn't available in every browser.
+    }
+    try {
+        if (document.referrer) candidates.push(new URL(document.referrer).origin);
+    } catch {
+        // Malformed or empty referrer.
+    }
+    return candidates.find(isDatadogUiOrigin) ?? null;
+}
+
+/** Fallback when not embedded (local dev): the site the app was built for. */
+function siteBaseUrl(): string {
+    const site = (import.meta.env.VITE_DATADOG_SITE || 'datadoghq.com').replace(/^https?:\/\//, '').replace(/\/$/, '');
     // datadoghq.com → app.datadoghq.com; us3.datadoghq.com stays as-is.
     const host = site.split('.').length > 2 ? site : `app.${site}`;
     return `https://${host}`;
 }
 
-const BASE_URL = appBaseUrl();
+/**
+ * Base URL for links into Datadog. Uses the org the app is embedded in, so links
+ * stay in the right org whichever org or site the app is deployed to.
+ */
+let baseUrl: string | null = null;
+function datadogBaseUrl(): string {
+    baseUrl ??= embeddingDatadogOrigin() ?? siteBaseUrl();
+    return baseUrl;
+}
 
 /** Only returns a link for a real, positive integer monitor id. */
 export function monitorUrl(monitorId: number): string | null {
-    return Number.isInteger(monitorId) && monitorId > 0 ? `${BASE_URL}/monitors/${monitorId}` : null;
+    return Number.isInteger(monitorId) && monitorId > 0 ? `${datadogBaseUrl()}/monitors/${monitorId}` : null;
 }
 
-export function downtimeUrl(downtimeId: string, actionUrl?: string | null): string {
-    if (actionUrl && /^https:\/\//.test(actionUrl)) {
-        return actionUrl;
-    }
-    return `${BASE_URL}/monitors/downtimes?id=${encodeURIComponent(downtimeId)}`;
+/** Link to a downtime in the org the app runs in (the API's own `url` always points at app.datadoghq.com). */
+export function downtimeUrl(downtimeId: string): string {
+    return `${datadogBaseUrl()}/monitors/downtimes?id=${encodeURIComponent(downtimeId)}`;
 }
 
 const DATE_FORMAT = new Intl.DateTimeFormat(undefined, {
@@ -230,14 +272,7 @@ function clickDownload(doc: Document, url: string, filename: string, label: stri
  * allowed to escape the sandbox) and start the download from there.
  */
 export function downloadFile(filename: string, content: string, mimeType: string): void {
-    let isEmbedded = true;
-    try {
-        isEmbedded = window.self !== window.top;
-    } catch {
-        isEmbedded = true;
-    }
-
-    const popup = isEmbedded ? window.open('', '_blank') : null;
+    const popup = isEmbeddedInFrame() ? window.open('', '_blank') : null;
     const target = (popup ?? window) as typeof window;
     const blob = new target.Blob([content], { type: mimeType });
     const url = target.URL.createObjectURL(blob);
@@ -298,7 +333,9 @@ function rawErrorMessage(error: unknown): string {
 export function friendlyError(error: unknown, action = 'complete this action'): string {
     const message = rawErrorMessage(error);
     if (/\b403\b|forbidden|not authorized|permission/i.test(message)) {
-        return `You don't have permission to ${action}. Ask a Datadog admin for the "Monitors Downtime" (monitors_downtime) permission.`;
+        // Published Datadog apps run as their author (the account whose keys deployed them),
+        // not as the viewer, so the fix is on that account.
+        return `Datadog denied permission to ${action}. This app runs as its author (the account that deployed it), so ask a Datadog admin to grant that account the "Monitors Downtime" (monitors_downtime) permission.`;
     }
     if (/\b401\b|unauthorized|authentication/i.test(message)) {
         return 'Your Datadog session expired. Reload the page and try again.';
