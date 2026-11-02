@@ -1,4 +1,4 @@
-import { STALE_AFTER_MS, type CoverageRow, type DowntimeMatch, type WindowState } from './coverage.ts';
+import { STALE_AFTER_MS, type CoverageRow, type DowntimeMatch } from './coverage.ts';
 import type { CorrectionView } from './slo';
 
 type PillLevel = 'default' | 'success' | 'warning' | 'danger' | 'in-progress';
@@ -138,36 +138,12 @@ export function monitorStateLevel(state: string): PillLevel {
     }
 }
 
-export function maintenanceLevel(row: CoverageRow): PillLevel {
-    switch (row.maintenanceState) {
-        case 'Whole monitor':
-            return 'in-progress';
-        case 'Groups only':
-            return 'warning';
-        default:
-            return 'default';
-    }
-}
-
 export const MAINTENANCE_HINTS: Record<CoverageRow['maintenanceState'], string> = {
     'Whole monitor': 'Every group of this monitor is muted.',
     'Groups only': 'Only groups matching the downtime scope are muted.',
     'Not muting':
         'Datadog applies none of these downtimes to this monitor right now (for example, no current group matches the scope).',
 };
-
-export function windowLevel(state: WindowState): PillLevel {
-    switch (state) {
-        case 'Ending soon':
-            return 'warning';
-        case 'Stale':
-            return 'danger';
-        case 'Scheduled end':
-            return 'success';
-        default:
-            return 'default';
-    }
-}
 
 /** Compact duration such as `2d 4h`, `3h 12m`, `5m`, `1y 8mo`. */
 export function formatDuration(ms: number): string {
@@ -189,20 +165,6 @@ export function formatDuration(ms: number): string {
 export function formatRelative(ms: number | null, nowMs: number): string | null {
     if (ms === null) return null;
     return ms >= nowMs ? `in ${formatDuration(ms - nowMs)}` : `${formatDuration(nowMs - ms)} ago`;
-}
-
-export function windowDetail(match: DowntimeMatch, state: WindowState, nowMs: number): string {
-    if (match.downtime.isPlaceholder) {
-        return 'Inspect to load from Datadog';
-    }
-    if (match.endMs !== null) {
-        return `Ends ${formatRelative(match.endMs, nowMs)}`;
-    }
-    const running = match.startMs !== null ? formatDuration(nowMs - match.startMs) : null;
-    if (state === 'Stale') {
-        return `No end date · running ${running}`;
-    }
-    return running ? `No end date · running ${running}` : 'No end date';
 }
 
 /** Human label for what the downtime silences: the whole monitor or specific groups. */
@@ -268,6 +230,7 @@ export function downtimeSetBy(row: CoverageRow): string | null {
         (creator) =>
             creator !== 'Resolving…' &&
             creator !== 'Loading…' &&
+            !creator.startsWith('Unknown') &&
             creator !== row.owner &&
             !creator.startsWith(`${row.owner} (`),
     );
@@ -284,27 +247,6 @@ export function matchHowLabel(match: DowntimeMatch): string {
         case 'scope':
             return 'By scope';
     }
-}
-
-export function matchKindLabel(match: DowntimeMatch): string {
-    switch (match.kind) {
-        case 'direct':
-            return 'Direct (monitor ID)';
-        case 'tag':
-            return 'Tag-based';
-        case 'scope':
-            return 'Scope-based';
-    }
-}
-
-export function coverageSummary(row: CoverageRow): string {
-    const count = row.matches.length;
-    const direct = row.matches.filter((m) => m.kind === 'direct').length;
-    const indirect = count - direct;
-    const parts: string[] = [];
-    if (direct) parts.push(`${direct} direct`);
-    if (indirect) parts.push(`${indirect} tag/scope`);
-    return `${count} active ${count === 1 ? 'downtime' : 'downtimes'} (${parts.join(', ')})`;
 }
 
 export interface ExportRecord {
@@ -327,6 +269,17 @@ export interface ExportRecord {
     downtime_end: string;
     all_active_downtime_ids: string;
     related_slos: string;
+}
+
+/** How many active downtimes cover a row, by kind (for exports). */
+export function coverageSummary(row: CoverageRow): string {
+    const count = row.matches.length;
+    const direct = row.matches.filter((m) => m.kind === 'direct').length;
+    const indirect = count - direct;
+    const parts: string[] = [];
+    if (direct) parts.push(`${direct} direct`);
+    if (indirect) parts.push(`${indirect} tag/scope`);
+    return `${count} active ${count === 1 ? 'downtime' : 'downtimes'} (${parts.join(', ')})`;
 }
 
 export function toExportRecords(rows: CoverageRow[], relatedSloNames: Map<number, string[]> = new Map()): ExportRecord[] {
@@ -413,7 +366,7 @@ export function downloadFile(filename: string, content: string, mimeType: string
     }
 }
 
-export const PLACEHOLDER_ACTION_HINT = 'Open this monitor first to load its downtimes from Datadog.';
+const PLACEHOLDER_ACTION_HINT = 'Open this monitor first to load its downtimes from Datadog.';
 const LOADING_ACTION_HINT = 'Downtimes are still loading.';
 
 /** Why a downtime can't be canceled from this app, or null if it can. */

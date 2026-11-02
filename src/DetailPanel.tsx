@@ -349,14 +349,14 @@ export function DetailPanel({
                         ) : (
                             <div className="downtime-card">
                                 <Text as="div" size="md" weight="bold" className="downtime-headline">
+                                    {/* A downtime that matches no current group is only set to mute. */}
+                                    {row.maintenanceState === 'Not muting' ? 'Set to mute ' : 'Muting '}
                                     {isPlaceholder ? (
-                                        'Muting some groups'
+                                        'some groups'
                                     ) : what === 'All groups' ? (
-                                        'Muting all groups'
+                                        'all groups'
                                     ) : (
-                                        <>
-                                            Muting <code className="inline-code">{what}</code>
-                                        </>
+                                        <code className="inline-code">{what}</code>
                                     )}
                                 </Text>
                                 {ends && !isPlaceholder && (

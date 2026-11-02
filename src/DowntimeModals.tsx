@@ -389,7 +389,7 @@ export function ExtendCorrectionModal({ target, nowMs, isPending, error, onClose
             currentEndMs={view.endMs}
             nowMs={nowMs}
             blockedReason={correctionExtendBlockedReason(view)}
-            unchangedNote="The start stays unchanged."
+            unchangedNote="Its start stays the same."
             confirmLabel="Extend correction"
             isPending={isPending}
             error={error}

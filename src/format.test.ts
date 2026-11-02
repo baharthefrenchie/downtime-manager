@@ -116,6 +116,7 @@ describe('plain-language table labels', () => {
         const row = (owner: string, downtimeCreators: string[]) => ({ owner, downtimeCreators }) as unknown as Parameters<typeof downtimeSetBy>[0];
         assert.equal(downtimeSetBy(row('Bo', ['Bo (bo@x.io)'])), null);
         assert.equal(downtimeSetBy(row('Bo', ['Resolving…'])), null);
+        assert.equal(downtimeSetBy(row('Bo', ['Unknown (not in the downtime list)'])), null);
         assert.equal(downtimeSetBy(row('Bo', ['Al (al@x.io)'])), 'Downtime by Al (al@x.io)');
     });
 });

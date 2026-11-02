@@ -339,7 +339,7 @@ export function buildCoverageRows(
 
     const creatorLabelOf = (downtime: LiveDowntime) => {
         if (downtime.isLoading) return 'Loading…';
-        if (downtime.fromDatadogMatch) return 'Not in downtime list';
+        if (downtime.fromDatadogMatch) return 'Unknown (not in the downtime list)';
         const id = downtime.createdById;
         if (!id) return 'Unknown';
         if (users?.[id]) return userLabel(users[id], id);
