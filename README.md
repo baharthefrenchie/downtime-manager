@@ -6,20 +6,34 @@ active downtimes, using live data from the Datadog org it runs in.
 
 ## What it does
 
+- **At a glance:** five summary tiles that double as one-click filters: *Muted monitors*,
+  *Muted while alerting* (alerts that page nobody), *Ending within 24h*, *No end for 30+ days*
+  (possibly forgotten) and *Active SLO corrections*.
 - **Monitor-centric table:** one row per monitor covered by a validated active downtime
-  (status `active`, start in the past or missing, end in the future or missing).
+  (status `active`, start in the past or missing, end in the future or missing). Each row shows
+  the monitor's state, what is muted and how (*All groups · by monitor ID*), when the downtime
+  ends, related SLOs and the owner. Only the monitor state is a colored pill; an end time turns
+  amber within the hour, and an open-ended downtime after 30 days. Click a row for details; the
+  ⋯ menu opens the monitor or downtime in Datadog, or extends or cancels the downtime.
 - **Direct vs tag/scope coverage:** matches downtimes by `monitor_identifier.monitor_id`, and by
   monitor tags / scope compared against the monitor's tags.
-- **What is really muted:** *Whole monitor*, *Groups only*, or *Not muting*. Datadog's own list of
-  muted monitors (`muted:true`) is the source of truth, so the "Monitors in Maintenance" count
+- **What is really muted:** *Whole monitor*, *Some groups*, or *Not muting*. Datadog's own list of
+  muted monitors (`muted:true`) is the source of truth, so the *Muted monitors* count
   matches the Datadog Monitors page. Monitors muted by downtimes that the downtime list API doesn't
   return (such as host auto-mutes) are included; their downtimes load from Datadog when you inspect
   them. Monitors with an active downtime that mutes no current group are shown as *Not muting* and
   aren't counted.
-- **Window state:** *Ending soon* (< 24h), *Scheduled end*, *Open-ended*, *Stale* (open-ended > 30d),
-  with relative times. Open-ended downtimes show *Indefinitely*.
-- **Actions:** inspect (side panel with raw get-downtime JSON), **extend** and **cancel**. Both
-  re-read the downtime live and refuse if it is no longer active.
+- **When it ends:** filter by *Ends within 24h*, *Ends later*, *No end (recent)* or *No end for
+  30+ days*. Open-ended downtimes show *No end* and how long they have run.
+- **Side panel:** opens with what the downtime mutes and until when, with **Extend** and
+  **Cancel downtime** beside it, then its details, the related SLOs and their corrections. IDs,
+  the matching rule and the raw get-downtime JSON are under *Show technical details*. When several
+  downtimes mute a monitor, switch between them at the top. Extend and cancel re-read the
+  downtime live and refuse if it is no longer active.
+- **Fast first load:** the monitors Datadog reports as muted appear in about a second, and their
+  downtimes fill in a few seconds later (the downtime list is the slow part). Later visits start
+  from the last data saved in the browser and refresh in the background; creator names are
+  cached for a week.
 - **Downtime and its SLO corrections together:** the extend and cancel dialogs list the SLO
   corrections linked to the downtime. A correction is linked when it is one-time, hasn't ended,
   its window overlaps the downtime's, and it either targets one of the downtime's related SLOs (by
@@ -42,8 +56,9 @@ active downtimes, using live data from the Datadog org it runs in.
   the default). Reserved keys: `id`, `name`, `type`, `status`, `owner`, `creator`, `scope`,
   `downtime`, `message`; use `tag:key:value` for a tag that shares a reserved name. Keys and values
   are suggested as you type.
-- **Filters:** maintenance state, window, owner/creator, and downtime start date. Filters live in the
-  URL, so filtered views are shareable. Export the filtered rows to CSV or JSON.
+- **Filters:** what is muted, when it ends, downtime creator, *Has SLOs* and *Started between…*.
+  Filters live in the URL, so filtered views are shareable. **Export** the filtered rows to CSV or
+  JSON. On small screens the filters fold behind a *Filters* button.
 - **Related SLOs:** for each monitor in maintenance, the SLOs it affects, each with its SLI, error
   budget and current corrections. How an SLO is related depends on its type:
   - **Monitor-based SLOs** are computed from their own monitors, so they are related only when they

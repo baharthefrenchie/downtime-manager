@@ -5,17 +5,11 @@ import { Button } from '@datadog/druids/form/Button';
 import { Checkbox } from '@datadog/druids/form/Checkbox';
 import { Select } from '@datadog/druids/form/Select';
 import { SoftToggle } from '@datadog/druids/form/SoftToggle';
-import { ClockIcon } from '@datadog/druids/icons/Clock';
 import { DownloadIcon } from '@datadog/druids/icons/Download';
-import { ExternalLinkIcon } from '@datadog/druids/icons/ExternalLink';
-import { EyeIcon } from '@datadog/druids/icons/Eye';
 import { RefreshIcon } from '@datadog/druids/icons/Refresh';
-import { TrashIcon } from '@datadog/druids/icons/Trash';
-import { Grid } from '@datadog/druids/layout/Grid';
-import { CalloutValue } from '@datadog/druids/measures/CalloutValue';
 import { MessageBox } from '@datadog/druids/misc/MessageBox';
 import { StatusPill } from '@datadog/druids/pills/StatusPill';
-import { Table, type TableColumn } from '@datadog/druids/table/Table';
+import { Table } from '@datadog/druids/table/Table';
 import { Text } from '@datadog/druids/typography/Text';
 
 import datadogLogo from './assets/datadog-logo.png';
@@ -29,26 +23,11 @@ import {
     type MaintenanceState,
     type WindowState,
 } from './coverage';
-import {
-    coverageSummary,
-    cancelBlockedReason,
-    downloadFile,
-    extendBlockedReason,
-    formatEnd,
-    formatRelative,
-    formatStart,
-    friendlyError,
-    MAINTENANCE_HINTS,
-    maintenanceLevel,
-    monitorStateLevel,
-    monitorUrl,
-    mutedScopeLabel,
-    toCsv,
-    toExportRecords,
-    windowDetail,
-    windowLevel,
-} from './format';
-import { useDensity, useUrlFilters, type Density } from './hooks';
+import { downloadFile, formatEnd, formatRelative, friendlyError, toCsv, toExportRecords } from './format';
+import { useDensity, useUrlFilters } from './hooks';
+import { useMonitorColumns } from './monitorColumns';
+import { RowMenu } from './RowMenu';
+import { SummaryTiles, type SummaryTile } from './SummaryTiles';
 import { useCreatorNames } from './useCreatorNames';
 import type { CorrectionTarget } from './DowntimeModals';
 import { linkedCorrectionLabel, type LinkedCorrectionsState } from './linkedCorrections';
@@ -64,6 +43,7 @@ import {
     cancelActiveDowntime,
     extendActiveDowntime,
     loadMaintenanceSnapshot,
+    loadMutedMonitors,
 } from './maintenance.backend';
 
 // Loaded on first use (and prefetched once the table is on screen) to keep the
@@ -91,6 +71,8 @@ type Option<T extends string> = { label: string; value: T };
 type MaintenanceFilter = 'all' | MaintenanceState;
 type WindowFilter = 'all' | WindowState;
 type ActionTarget = { row: CoverageRow; match: DowntimeMatch };
+/** The quick filter a summary tile applies. */
+const ALERTING_QUERY = 'status:Alert';
 type Toast = {
     level: 'success' | 'warning' | 'danger';
     title: string;
@@ -100,32 +82,21 @@ type Toast = {
 };
 /** What happened to one linked SLO correction after its downtime changed. */
 type CorrectionOutcome = { label: string; ok: boolean; detail: string };
-type Cell = { row: { original: CoverageRow } };
 
 const MAINTENANCE_OPTIONS: Option<MaintenanceFilter>[] = [
     { label: 'All', value: 'all' },
     { label: 'Whole monitor', value: 'Whole monitor' },
-    { label: 'Groups only', value: 'Groups only' },
+    { label: 'Some groups', value: 'Groups only' },
     { label: 'Not muting', value: 'Not muting' },
 ];
 
 const WINDOW_OPTIONS: Option<WindowFilter>[] = [
-    { label: 'Any window', value: 'all' },
-    { label: 'Ending soon (< 24h)', value: 'Ending soon' },
-    { label: 'Has a scheduled end', value: 'Scheduled end' },
-    { label: 'Open-ended (recent)', value: 'Open-ended' },
-    { label: 'Stale (open-ended > 30d)', value: 'Stale' },
+    { label: 'Any end time', value: 'all' },
+    { label: 'Ends within 24h', value: 'Ending soon' },
+    { label: 'Ends later', value: 'Scheduled end' },
+    { label: 'No end (recent)', value: 'Open-ended' },
+    { label: 'No end for 30+ days', value: 'Stale' },
 ];
-
-/** Columns shown at each layout density, in display order. */
-const COLUMNS_BY_DENSITY: Record<Density, string[]> = {
-    xl: ['monitor', 'monitorState', 'maintenanceState', 'source', 'window', 'slos', 'owner', 'message', 'start', 'end', 'actions'],
-    wide: ['monitor', 'monitorState', 'maintenanceState', 'source', 'window', 'slos', 'owner', 'actions'],
-    medium: ['monitor', 'monitorState', 'status', 'end', 'actions'],
-    narrow: ['monitor', 'status', 'actions'],
-};
-
-const MONITOR_COLUMN_WIDTH: Record<Density, number> = { xl: 300, wide: 280, medium: 260, narrow: 140 };
 
 function isOneOf<T extends string>(value: string, options: Option<T>[]): value is T {
     return options.some((option) => option.value === value);
@@ -149,11 +120,23 @@ function App() {
         refetchOnWindowFocus: true,
         staleTime: 60_000,
     });
-    const { data: snapshot, dataUpdatedAt } = snapshotQuery;
+    // The fast first look for a first visit: the muted monitors in about a second, shown
+    // while the full snapshot (whose downtime list takes several seconds) is loading.
+    const previewQuery = useQuery({
+        queryKey: ['muted-monitors-preview'],
+        queryFn: () => loadMutedMonitors(),
+        enabled: !snapshotQuery.data,
+        staleTime: Infinity,
+        retry: false,
+    });
+    const liveSnapshot = snapshotQuery.data;
+    const isPreview = !liveSnapshot && Boolean(previewQuery.data);
+    const snapshot = liveSnapshot ?? previewQuery.data;
+    const dataUpdatedAt = liveSnapshot ? snapshotQuery.dataUpdatedAt : previewQuery.dataUpdatedAt;
     const isShowingSavedData = Boolean(cachedSnapshot) && dataUpdatedAt === cachedSnapshot?.savedAt;
     useEffect(() => {
-        if (snapshot && !isShowingSavedData) writeCache('snapshot', snapshot, dataUpdatedAt);
-    }, [snapshot, dataUpdatedAt, isShowingSavedData]);
+        if (liveSnapshot && !isShowingSavedData) writeCache('snapshot', liveSnapshot, dataUpdatedAt);
+    }, [liveSnapshot, dataUpdatedAt, isShowingSavedData]);
 
 
     // "Active" is evaluated against the moment the snapshot arrived.
@@ -176,18 +159,22 @@ function App() {
         });
     }, []);
 
-    // Creator names: cached per browser, only missing ids are looked up (in batches).
+    // Creator names: cached per browser, only missing ids are looked up (in batches),
+    // the open monitor's first, then in table order.
     const creatorIds = useMemo(() => {
         const ids = new Set<string>();
-        baseRows.forEach((row) => row.matches.forEach((m) => m.downtime.createdById && ids.add(m.downtime.createdById)));
+        const add = (row: CoverageRow) => row.matches.forEach((m) => m.downtime.createdById && ids.add(m.downtime.createdById));
+        const open = filters.monitor === null ? undefined : baseRows.find((row) => row.monitor.id === filters.monitor);
+        if (open) add(open);
+        baseRows.forEach(add);
         return [...ids];
-    }, [baseRows]);
+    }, [baseRows, filters.monitor]);
     // Names for the rows at the top of the table resolve first.
-    const { users, resolvingIds } = useCreatorNames(creatorIds);
+    const { users, unknownIds } = useCreatorNames(creatorIds);
 
     const rows = useMemo(
-        () => (snapshot ? buildCoverageRows(snapshot, dataUpdatedAt, users, verified, resolvingIds) : []),
-        [snapshot, dataUpdatedAt, users, verified, resolvingIds],
+        () => (snapshot ? buildCoverageRows(snapshot, dataUpdatedAt, users, verified, unknownIds) : []),
+        [snapshot, dataUpdatedAt, users, verified, unknownIds],
     );
 
     // SLOs related to these monitors and their corrections (loaded in parallel, cached).
@@ -263,31 +250,38 @@ function App() {
         ],
     );
 
-    // Cards count monitors that are actually muted, matching Datadog's own "muted" count;
-    // "Not muting" rows stay in the table but aren't counted.
+    // Summary tiles count across every row (they are filters themselves). Monitors count when
+    // they're actually muted, matching Datadog's own "muted" count.
     const summary = useMemo(() => {
         const downtimeIds = new Set<string>();
-        const owners = new Set<string>();
         const sloIds = new Set<string>();
         let monitors = 0;
-        filteredRows.forEach((row) => {
+        let alerting = 0;
+        let endingSoon = 0;
+        let stale = 0;
+        rows.forEach((row) => {
             if (row.maintenanceState === 'Not muting') return;
             monitors += 1;
+            if (/^alert$/i.test(row.monitor.overallState)) alerting += 1;
+            if (row.windowState === 'Ending soon') endingSoon += 1;
+            if (row.windowState === 'Stale') stale += 1;
             row.matches.forEach((m) => {
                 if (!m.downtime.isPlaceholder) downtimeIds.add(m.downtime.id);
             });
-            owners.add(row.owner);
             relatedByMonitor.get(row.monitor.id)?.forEach(({ slo }) => sloIds.add(slo.id));
         });
-        return { monitors, downtimes: downtimeIds.size, owners: owners.size, slos: sloIds.size };
-    }, [filteredRows, relatedByMonitor]);
+        return { monitors, alerting, endingSoon, stale, downtimes: downtimeIds.size, slos: sloIds.size };
+    }, [rows, relatedByMonitor]);
 
     // Current SLO corrections on SLOs related to the filtered monitors.
     const correctionRows = useMemo(
         () => correctionRowsFor(filteredRows, relatedByMonitor, correctionsBySlo),
         [filteredRows, relatedByMonitor, correctionsBySlo],
     );
-    const activeCorrections = correctionRows.filter((row) => row.view.state === 'Active').length;
+    const activeCorrections = useMemo(
+        () => correctionRowsFor(rows, relatedByMonitor, correctionsBySlo).filter((row) => row.view.state === 'Active').length,
+        [rows, relatedByMonitor, correctionsBySlo],
+    );
 
     // Prefetch the lazily loaded panel, dialogs and date picker once data is on screen,
     // so the first click doesn't wait on a download.
@@ -310,6 +304,8 @@ function App() {
     const [cancelTarget, setCancelTarget] = useState<ActionTarget | null>(null);
     const [extendTarget, setExtendTarget] = useState<ActionTarget | null>(null);
     const [toast, setToast] = useState<Toast | null>(null);
+    // Small screens fold the filters away behind a button.
+    const [showFilters, setShowFilters] = useState(false);
 
     useEffect(() => {
         if (!toast) return undefined;
@@ -506,268 +502,21 @@ function App() {
     });
 
     // ---- Table ----
-    const allColumns = useMemo<Record<string, TableColumn<CoverageRow>>>(
-        () => ({
-            monitor: {
-                id: 'monitor',
-                Header: 'Monitor',
-                accessor: (row: CoverageRow) => row.monitor.name,
-                width: MONITOR_COLUMN_WIDTH[density],
-                Cell: ({ row }: Cell) => {
-                    const { monitor } = row.original;
-                    return (
-                        <div className="cell-stack">
-                            <Button
-                                isNaked
-                                hasEllipsisWithTooltip
-                                label={monitor.name}
-                                ariaLabel={`Show downtime details for ${monitor.name}`}
-                                onClick={() => openDetail(row.original)}
-                            />
-                            <Text size="xs" variant="tertiary" hasEllipsis>
-                                ID {monitor.id} · {monitor.type}
-                            </Text>
-                        </div>
-                    );
-                },
-            },
-            monitorState: {
-                id: 'monitorState',
-                Header: 'Monitor State',
-                accessor: (row: CoverageRow) => row.monitor.overallState,
-                width: 120,
-                Cell: ({ row }: Cell) => (
-                    <StatusPill level={monitorStateLevel(row.original.monitor.overallState)}>
-                        {row.original.monitor.overallState}
-                    </StatusPill>
-                ),
-            },
-            maintenanceState: {
-                id: 'maintenanceState',
-                Header: 'Maintenance State',
-                accessor: (row: CoverageRow) => row.maintenanceState,
-                width: 190,
-                Cell: ({ row }: Cell) => {
-                    const scope = mutedScopeLabel(row.original.primary);
-                    return (
-                        <div className="cell-stack">
-                            <StatusPill
-                                level={maintenanceLevel(row.original)}
-                                title={MAINTENANCE_HINTS[row.original.maintenanceState]}
-                            >
-                                {row.original.maintenanceState}
-                            </StatusPill>
-                            <Text size="xs" variant="tertiary" isMonospace hasEllipsis title={scope}>
-                                {scope}
-                            </Text>
-                        </div>
-                    );
-                },
-            },
-            // Narrow layouts combine maintenance state and window into one column.
-            status: {
-                id: 'status',
-                Header: 'Status',
-                accessor: (row: CoverageRow) => row.maintenanceState,
-                width: density === 'narrow' ? 130 : 170,
-                Cell: ({ row }: Cell) => (
-                    <div className="cell-stack">
-                        <StatusPill
-                            level={maintenanceLevel(row.original)}
-                            title={MAINTENANCE_HINTS[row.original.maintenanceState]}
-                        >
-                            {row.original.maintenanceState}
-                        </StatusPill>
-                        <StatusPill isSoft level={windowLevel(row.original.windowState)}>
-                            {row.original.windowState}
-                        </StatusPill>
-                    </div>
-                ),
-            },
-            source: {
-                id: 'source',
-                Header: 'Coverage Source',
-                accessor: (row: CoverageRow) => row.source,
-                width: 180,
-                Cell: ({ row }: Cell) => (
-                    <div className="cell-stack">
-                        <StatusPill isSoft level={row.original.source === 'Tag/Scope-based' ? 'default' : 'success'}>
-                            {row.original.source}
-                        </StatusPill>
-                        <Text size="xs" variant="tertiary" hasEllipsis title={row.original.primary.reason}>
-                            {coverageSummary(row.original)}
-                        </Text>
-                    </div>
-                ),
-            },
-            window: {
-                id: 'window',
-                Header: 'Window',
-                accessor: (row: CoverageRow) => row.windowState,
-                width: 170,
-                Cell: ({ row }: Cell) => (
-                    <div className="cell-stack">
-                        <StatusPill level={windowLevel(row.original.windowState)}>{row.original.windowState}</StatusPill>
-                        <Text size="xs" variant="tertiary" hasEllipsis>
-                            {windowDetail(row.original.primary, row.original.windowState, dataUpdatedAt)}
-                        </Text>
-                    </div>
-                ),
-            },
-            slos: {
-                id: 'slos',
-                Header: 'Related SLOs',
-                accessor: (row: CoverageRow) => relatedByMonitor.get(row.monitor.id)?.length ?? 0,
-                width: 150,
-                Cell: ({ row }: Cell) => {
-                    const related = relatedByMonitor.get(row.original.monitor.id) ?? [];
-                    if (related.length === 0) {
-                        return (
-                            <Text size="sm" variant="tertiary">
-                                {sloData.isLoading ? 'Loading…' : '—'}
-                            </Text>
-                        );
-                    }
-                    const corrections = related.flatMap(({ slo }) => correctionsBySlo.get(slo.id) ?? []);
-                    const active = corrections.filter((view) => view.state === 'Active').length;
-                    return (
-                        <div className="cell-stack">
-                            <Button
-                                isNaked
-                                isTitleCased={false}
-                                label={`${related.length} ${related.length === 1 ? 'SLO' : 'SLOs'}`}
-                                ariaLabel={`Show related SLOs for ${row.original.monitor.name}`}
-                                onClick={() => openDetail(row.original)}
-                            />
-                            <Text size="xs" variant="tertiary" hasEllipsis>
-                                {corrections.length === 0
-                                    ? 'No current corrections'
-                                    : `${corrections.length} correction${corrections.length === 1 ? '' : 's'}${active ? ` · ${active} active` : ''}`}
-                            </Text>
-                        </div>
-                    );
-                },
-            },
-            owner: {
-                id: 'owner',
-                Header: 'Owner',
-                accessor: (row: CoverageRow) => row.owner,
-                width: 160,
-                Cell: ({ row }: Cell) => (
-                    <div className="cell-stack">
-                        <Text hasEllipsis title={row.original.owner}>
-                            {row.original.owner}
-                        </Text>
-                        <Text size="xs" variant="tertiary" hasEllipsis title={row.original.downtimeCreators.join(', ')}>
-                            Downtime by {row.original.downtimeCreators.join(', ')}
-                        </Text>
-                    </div>
-                ),
-            },
-            message: {
-                id: 'message',
-                Header: 'Latest Downtime Message',
-                accessor: (row: CoverageRow) => row.latestMessage ?? '',
-                width: 220,
-                Cell: ({ row }: Cell) => (
-                    <Text
-                        hasEllipsis
-                        title={row.original.latestMessage ?? ''}
-                        variant={row.original.latestMessage ? 'default' : 'tertiary'}
-                    >
-                        {row.original.latestMessage ?? 'No message'}
-                    </Text>
-                ),
-            },
-            start: {
-                id: 'start',
-                Header: 'Downtime Start',
-                accessor: (row: CoverageRow) => row.primary.startMs ?? 0,
-                width: 160,
-                Cell: ({ row }: Cell) => (
-                    <div className="cell-stack">
-                        <Text>{formatStart(row.original.primary.startMs)}</Text>
-                        <Text size="xs" variant="tertiary">
-                            {formatRelative(row.original.primary.startMs, dataUpdatedAt) ?? ''}
-                        </Text>
-                    </div>
-                ),
-            },
-            end: {
-                id: 'end',
-                Header: 'Downtime End',
-                accessor: (row: CoverageRow) => row.primary.endMs ?? Number.MAX_SAFE_INTEGER,
-                width: 160,
-                Cell: ({ row }: Cell) => (
-                    <div className="cell-stack">
-                        <Text variant={row.original.primary.endMs === null ? 'warning' : 'default'}>
-                            {formatEnd(row.original.primary.endMs)}
-                        </Text>
-                        <Text size="xs" variant="tertiary">
-                            {formatRelative(row.original.primary.endMs, dataUpdatedAt) ?? 'Runs until canceled'}
-                        </Text>
-                    </div>
-                ),
-            },
-            actions: {
-                id: 'actions',
-                Header: '',
-                disableSortBy: true,
-                width: density === 'narrow' ? 100 : 132,
-                Cell: ({ row }: Cell) => {
-                    const { primary, monitor } = row.original;
-                    const extendBlocked = extendBlockedReason(primary);
-                    const url = monitorUrl(monitor.id);
-                    return (
-                        <div className="row-actions">
-                            <Button
-                                size="sm"
-                                isBorderless
-                                icon={EyeIcon}
-                                ariaLabel="Inspect downtime"
-                                tooltip="Inspect downtime"
-                                onClick={() => openDetail(row.original)}
-                            />
-                            {url && density !== 'narrow' && (
-                                <Button
-                                    size="sm"
-                                    isBorderless
-                                    icon={ExternalLinkIcon}
-                                    href={url}
-                                    isExternal
-                                    ariaLabel="Open monitor in Datadog"
-                                    tooltip="Open monitor in Datadog"
-                                />
-                            )}
-                            <Button
-                                size="sm"
-                                isBorderless
-                                icon={ClockIcon}
-                                ariaLabel="Extend downtime"
-                                tooltip={extendBlocked ?? 'Extend downtime'}
-                                isDisabled={Boolean(extendBlocked)}
-                                onClick={() => openExtend(row.original, primary)}
-                            />
-                            <Button
-                                size="sm"
-                                isBorderless
-                                level="danger"
-                                icon={TrashIcon}
-                                ariaLabel="Cancel downtime"
-                                tooltip={cancelBlockedReason(primary) ?? 'Cancel downtime'}
-                                isDisabled={Boolean(cancelBlockedReason(primary))}
-                                onClick={() => openCancel(row.original, primary)}
-                            />
-                        </div>
-                    );
-                },
-            },
-        }),
-        [density, dataUpdatedAt, openDetail, openCancel, openExtend, relatedByMonitor, correctionsBySlo, sloData.isLoading],
+    const columns = useMonitorColumns({
+        density,
+        nowMs: dataUpdatedAt,
+        relatedByMonitor,
+        correctionsBySlo,
+        isSloLoading: sloData.isLoading,
+        onOpen: openDetail,
+        onExtend: openExtend,
+        onCancel: openCancel,
+    });
+    // Clicking anywhere on a row opens its side panel.
+    const rowActions = useCallback(
+        (row: { original: CoverageRow }) => ({ onClick: () => openDetail(row.original), 'aria-label': `Show details for ${row.original.monitor.name}` }),
+        [openDetail],
     );
-    // Column widths are relative weights (DRUIDS lays columns out as `fr`), so each density
-    // shows only the columns that fit and the table always fills the container width.
-    const columns = useMemo(() => COLUMNS_BY_DENSITY[density].map((id) => allColumns[id]), [allColumns, density]);
 
     // ---- Export ----
     const exportStamp = () => new Date().toISOString().replace(/[:.]/g, '-');
@@ -791,6 +540,81 @@ function App() {
         windowFilter !== 'all' ||
         isDateFilterEnabled ||
         filters.withSlos;
+    const activeFilterCount =
+        (filters.q.trim() ? 1 : 0) +
+        (filters.owners.length > 0 ? 1 : 0) +
+        (maintenanceFilter !== 'all' ? 1 : 0) +
+        (windowFilter !== 'all' ? 1 : 0) +
+        (isDateFilterEnabled ? 1 : 0) +
+        (filters.withSlos ? 1 : 0);
+    const clearFilters = () =>
+        setFilters({ q: '', state: 'all', window: 'all', owners: [], from: null, to: null, withSlos: false });
+
+    const statusText = isPreview
+        ? 'Loading downtimes…'
+        : isShowingSavedData && snapshotQuery.isFetching
+          ? `Saved ${formatRelative(dataUpdatedAt, mountedAt) ?? ''} · updating…`
+          : snapshotQuery.isFetching
+            ? 'Updating…'
+            : dataUpdatedAt > 0
+              ? `Updated ${new Date(dataUpdatedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
+              : '';
+
+    const isQuery = (q: string) => filters.q.trim().toLowerCase() === q.toLowerCase();
+    const showMonitors = (changes: Parameters<typeof setFilters>[0]) => setFilters({ view: 'monitors', ...changes });
+    const tiles: SummaryTile[] = [
+        {
+            key: 'muted',
+            label: 'Muted monitors',
+            value: snapshot ? summary.monitors : null,
+            hint: isPreview ? 'Loading downtimes…' : `${summary.downtimes.toLocaleString()} active downtimes`,
+            isActive: filters.view === 'monitors' && !hasFilters,
+            actionLabel: 'Show every muted monitor',
+            onClick: () => {
+                clearFilters();
+                setFilters({ view: 'monitors' });
+            },
+        },
+        {
+            key: 'alerting',
+            label: 'Muted while alerting',
+            value: snapshot ? summary.alerting : null,
+            hint: 'Alerts that page nobody',
+            tone: 'danger',
+            isActive: filters.view === 'monitors' && isQuery(ALERTING_QUERY),
+            actionLabel: 'Show muted monitors that are alerting',
+            onClick: () => showMonitors({ q: isQuery(ALERTING_QUERY) ? '' : ALERTING_QUERY }),
+        },
+        {
+            key: 'ending',
+            label: 'Ending within 24h',
+            value: liveSnapshot ? summary.endingSoon : null,
+            hint: 'Extend them if work is ongoing',
+            tone: 'warning',
+            isActive: filters.view === 'monitors' && windowFilter === 'Ending soon',
+            actionLabel: 'Show downtimes ending within 24 hours',
+            onClick: () => showMonitors({ window: windowFilter === 'Ending soon' ? 'all' : 'Ending soon' }),
+        },
+        {
+            key: 'stale',
+            label: 'No end for 30+ days',
+            value: liveSnapshot ? summary.stale : null,
+            hint: 'Possibly forgotten',
+            tone: 'warning',
+            isActive: filters.view === 'monitors' && windowFilter === 'Stale',
+            actionLabel: 'Show downtimes with no end that started over 30 days ago',
+            onClick: () => showMonitors({ window: windowFilter === 'Stale' ? 'all' : 'Stale' }),
+        },
+        {
+            key: 'corrections',
+            label: 'Active SLO corrections',
+            value: sloData.isLoading ? null : activeCorrections,
+            hint: sloData.isLoading ? 'Loading SLOs…' : `${summary.slos.toLocaleString()} related SLOs`,
+            isActive: filters.view === 'corrections',
+            actionLabel: 'Show SLO corrections on related SLOs',
+            onClick: () => setFilters({ view: filters.view === 'corrections' ? 'monitors' : 'corrections' }),
+        },
+    ];
 
     return (
         <div ref={rootRef} className={`app app--${density}`}>
@@ -809,97 +633,66 @@ function App() {
                 </div>
             )}
 
-            <header className="surface header">
-                <img src={datadogLogo} alt="Datadog" className="header-logo" />
+            <header className="header">
+                <img src={datadogLogo} alt="" className="header-logo" />
                 <div className="header-copy">
                     <Text as="h1" size={isNarrow ? 'md' : 'lg'} weight="bold" hasEllipsis>
                         On-Call Maintenance Downtime Manager
                     </Text>
-                    {!isNarrow && (
-                        <Text as="p" size="sm" variant="secondary">
-                            Monitors muted right now by active downtimes — directly by monitor ID or by tags and scope,
-                            for the whole monitor or only some groups — and the SLOs they affect. Inspect, extend, or
-                            cancel downtimes and SLO corrections safely.
+                    {!isCompact && (
+                        <Text as="p" size="sm" variant="secondary" hasEllipsis>
+                            Monitors muted by active downtimes right now, and the SLOs they affect.
                         </Text>
                     )}
                 </div>
                 <div className="header-meta">
-                    {isShowingSavedData && snapshotQuery.isFetching ? (
-                        <StatusPill isSoft level="in-progress" title="Showing your last saved data while live data loads">
-                            {isCompact ? 'Updating' : `Saved ${formatRelative(dataUpdatedAt, mountedAt) ?? ''} · updating`}
-                        </StatusPill>
-                    ) : (
-                        !isCompact &&
-                        dataUpdatedAt > 0 && (
-                            <Text size="xs" variant="tertiary">
-                                Live · updated {new Date(dataUpdatedAt).toLocaleTimeString()}
-                            </Text>
-                        )
+                    {!isNarrow && (
+                        <Text size="xs" variant="tertiary" hasEllipsis title={dataUpdatedAt > 0 ? new Date(dataUpdatedAt).toLocaleString() : undefined}>
+                            {statusText}
+                        </Text>
                     )}
-                    <Button
-                        size="sm"
-                        icon={DownloadIcon}
-                        label={isCompact ? undefined : 'CSV'}
-                        ariaLabel="Export CSV"
-                        tooltip="Export the filtered rows as CSV"
-                        isDisabled={filteredRows.length === 0}
-                        onClick={exportCsv}
-                    />
-                    <Button
-                        size="sm"
-                        icon={DownloadIcon}
-                        label={isCompact ? undefined : 'JSON'}
-                        ariaLabel="Export JSON"
-                        tooltip="Export the filtered rows as JSON"
-                        isDisabled={filteredRows.length === 0}
-                        onClick={exportJson}
+                    <RowMenu
+                        label="Export"
+                        handle={
+                            <Button
+                                size="sm"
+                                icon={DownloadIcon}
+                                label={isCompact ? undefined : 'Export'}
+                                ariaLabel="Export the filtered rows"
+                                isDisabled={filteredRows.length === 0}
+                            />
+                        }
+                        items={[
+                            { label: `CSV (${filteredRows.length} rows)`, onSelect: exportCsv },
+                            { label: `JSON (${filteredRows.length} rows)`, onSelect: exportJson },
+                        ]}
                     />
                     <Button
                         size="sm"
                         icon={RefreshIcon}
-                        label={isNarrow ? undefined : 'Refresh'}
+                        label={isCompact ? undefined : 'Refresh'}
                         ariaLabel="Refresh live data"
-                        tooltip={isNarrow ? 'Refresh live data' : undefined}
+                        tooltip={isCompact ? 'Refresh live data' : undefined}
                         isLoading={snapshotQuery.isFetching}
                         onClick={() => void snapshotQuery.refetch()}
                     />
                 </div>
             </header>
 
-            <Grid minWidth={isNarrow ? 96 : 180} gap="sm" isFullWidth className="summary">
-                <CalloutValue
-                    className="surface"
-                    size={isNarrow ? 'sm' : 'md'}
-                    label={isNarrow ? 'Muted' : 'Monitors in Maintenance'}
-                    value={summary.monitors}
-                    isLoading={snapshotQuery.isLoading}
-                />
-                <CalloutValue
-                    className="surface"
-                    size={isNarrow ? 'sm' : 'md'}
-                    label={isNarrow ? 'Downtimes' : 'Downtime Windows'}
-                    value={summary.downtimes}
-                    isLoading={snapshotQuery.isLoading}
-                />
-                <CalloutValue
-                    className="surface"
-                    size={isNarrow ? 'sm' : 'md'}
-                    label={isNarrow ? 'Owners' : 'Owners in Scope'}
-                    value={summary.owners}
-                    isLoading={snapshotQuery.isLoading}
-                />
-                <CalloutValue
-                    className="surface"
-                    size={isNarrow ? 'sm' : 'md'}
-                    label={isNarrow ? 'SLOs' : 'Related SLOs'}
-                    value={summary.slos}
-                    additionalText={activeCorrections > 0 ? `${activeCorrections} active correction${activeCorrections === 1 ? '' : 's'}` : undefined}
-                    isLoading={snapshotQuery.isLoading || sloData.isLoading}
-                />
-            </Grid>
+            <SummaryTiles tiles={tiles} isCompact={isNarrow} />
 
             <section className="surface toolbar" aria-label="Filters">
-                <SearchBar value={filters.q} rows={rows} onChange={onQueryChange} />
+                <div className="toolbar-search">
+                    <SearchBar value={filters.q} rows={rows} onChange={onQueryChange} />
+                    {isNarrow && (
+                        <Button
+                            size="sm"
+                            label={activeFilterCount > (filters.q.trim() ? 1 : 0) ? `Filters (${activeFilterCount - (filters.q.trim() ? 1 : 0)})` : 'Filters'}
+                            isActive={showFilters}
+                            onClick={() => setShowFilters((value) => !value)}
+                        />
+                    )}
+                </div>
                 {dashboardFilters.length > 0 && (
                     <div className="dashboard-filters" aria-label="Dashboard template variables">
                         <Text size="xs" variant="secondary" weight="bold">
@@ -922,18 +715,19 @@ function App() {
                         />
                     </div>
                 )}
+                {(!isNarrow || showFilters) && (
                 <div className="toolbar-group">
                     {isNarrow ? (
                         <Select
                             size="sm"
                             minWidth="150px"
-                            options={MAINTENANCE_OPTIONS.map((o) => (o.value === 'all' ? { ...o, label: 'Any state' } : o))}
+                            options={MAINTENANCE_OPTIONS.map((o) => (o.value === 'all' ? { ...o, label: 'Anything muted' } : o))}
                             value={maintenanceFilter}
                             onChange={(option: Option<MaintenanceFilter>) => setFilters({ state: option.value })}
                         />
                     ) : (
                         <SoftToggle
-                            ariaLabel="Maintenance state"
+                            ariaLabel="What is muted"
                             options={MAINTENANCE_OPTIONS}
                             value={maintenanceFilter}
                             onChange={(value) => setFilters({ state: value })}
@@ -952,7 +746,7 @@ function App() {
                         clearable
                         minWidth="180px"
                         maxWidth="360px"
-                        placeholder="All Creators"
+                        placeholder="Downtime created by anyone"
                         options={ownerOptions}
                         value={filters.owners}
                         onChange={(options: Option<string>[] | Option<string> | null) =>
@@ -962,12 +756,12 @@ function App() {
                         }
                     />
                     <Checkbox
-                        label="With related SLOs"
+                        label="Has SLOs"
                         isChecked={filters.withSlos}
                         onChange={(event) => setFilters({ withSlos: event.target.checked })}
                     />
                     <Checkbox
-                        label="Start date"
+                        label="Started between…"
                         isChecked={isDateFilterEnabled}
                         onChange={(event) =>
                             setFilters(
@@ -986,42 +780,23 @@ function App() {
                             />
                         </Suspense>
                     )}
-                    {hasFilters && (
-                        <Button
-                            size="sm"
-                            isNaked
-                            label="Clear filters"
-                            onClick={() =>
-                                setFilters({
-                                    q: '',
-                                    state: 'all',
-                                    window: 'all',
-                                    owners: [],
-                                    from: null,
-                                    to: null,
-                                    withSlos: false,
-                                })
-                            }
-                        />
-                    )}
+                    {hasFilters && <Button size="sm" isNaked label="Clear filters" onClick={clearFilters} />}
                 </div>
+                )}
             </section>
 
-            <section className="surface table-section" aria-label="Maintenance Monitor Coverage">
+            <section className="surface table-section" aria-label={filters.view === 'corrections' ? 'SLO corrections' : 'Muted monitors'}>
                 <div className="table-heading">
-                    <Text as="h2" size="md" weight="bold">
-                        {filters.view === 'corrections' ? 'SLO Corrections' : 'Maintenance Monitor Coverage'}
-                    </Text>
+                    <SoftToggle
+                        ariaLabel="View"
+                        options={[
+                            { label: `Monitors (${filteredRows.length})`, value: 'monitors' },
+                            { label: `SLO corrections (${correctionRows.length})`, value: 'corrections' },
+                        ]}
+                        value={filters.view}
+                        onChange={(value) => setFilters({ view: value as 'monitors' | 'corrections' })}
+                    />
                     <div className="table-heading-meta">
-                        <SoftToggle
-                            ariaLabel="View"
-                            options={[
-                                { label: isNarrow ? 'Monitors' : `Monitors (${filteredRows.length})`, value: 'monitors' },
-                                { label: isNarrow ? 'SLO corrections' : `SLO corrections (${correctionRows.length})`, value: 'corrections' },
-                            ]}
-                            value={filters.view}
-                            onChange={(value) => setFilters({ view: value as 'monitors' | 'corrections' })}
-                        />
                         {filters.view === 'corrections' && (
                             <Checkbox
                                 label={isNarrow ? 'Strict matching' : 'Strict SLO matching'}
@@ -1030,9 +805,9 @@ function App() {
                                 title="Off: an SLO is related when it carries the downtime's group scope (for example project:gen2). On: it must carry every monitor tag and every scope term of the downtime."
                             />
                         )}
-                        {!isNarrow && filters.view === 'monitors' && (
+                        {!isNarrow && filters.view === 'monitors' && filteredRows.length !== rows.length && (
                             <Text size="sm" variant="secondary">
-                                {filteredRows.length} of {rows.length} monitors
+                                Showing {filteredRows.length} of {rows.length}
                             </Text>
                         )}
                     </div>
@@ -1051,11 +826,12 @@ function App() {
                     ) : (
                     <Table<CoverageRow>
                         key={density}
-                        aria-label="Maintenance Monitor Coverage"
+                        aria-label="Muted monitors"
                         data={filteredRows}
                         columns={columns}
                         getRowId={(row: CoverageRow) => String(row.monitor.id)}
-                        isLoading={snapshotQuery.isLoading}
+                        rowActions={rowActions}
+                        isLoading={!snapshot && (snapshotQuery.isLoading || previewQuery.isLoading)}
                         stickyHeaders
                         isBorderless
                         size="sm"
@@ -1074,12 +850,12 @@ function App() {
                                       : 'No monitors match these filters',
                             subtitle:
                                 rows.length === 0
-                                    ? 'No validated active downtime currently covers a monitor in this org.'
-                                    : 'Clear the filters to see every covered monitor.',
+                                    ? 'No active downtime mutes a monitor in this org right now.'
+                                    : 'Clear the filters to see every muted monitor.',
                         }}
                         errorState={{
                             isShown: snapshotQuery.isError,
-                            title: 'Unable to load live monitors and downtimes',
+                            title: "Couldn't load monitors and downtimes",
                             subtitle: snapshotQuery.isError ? friendlyError(snapshotQuery.error, 'read monitors') : undefined,
                         }}
                     />
@@ -1109,6 +885,7 @@ function App() {
                         key={`cancel-${cancelTarget.match.downtime.id}`}
                         target={cancelTarget}
                         linked={linkedFor(cancelTarget.match)}
+                        nowMs={dataUpdatedAt}
                         isPending={cancelMutation.isPending}
                         error={cancelMutation.error ? friendlyError(cancelMutation.error, 'cancel downtimes') : null}
                         onClose={() => setCancelTarget(null)}

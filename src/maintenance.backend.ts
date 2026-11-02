@@ -83,22 +83,38 @@ async function listAllMonitors(): Promise<LiveMonitor[]> {
 }
 
 /**
- * Ids of every monitor Datadog itself reports as muted (`muted:true`). This is
- * the source of truth for "in maintenance": it includes monitors muted by
+ * Every monitor Datadog itself reports as muted (`muted:true`). This is the
+ * source of truth for "in maintenance": it includes monitors muted by
  * downtimes the downtime list API doesn't return, such as host auto-mutes.
  */
-async function listDatadogMutedMonitorIds(): Promise<number[]> {
-    const ids: number[] = [];
+async function listDatadogMutedMonitors(): Promise<LiveMonitor[]> {
+    const monitors: LiveMonitor[] = [];
     for (let page = 0; page < MAX_MONITOR_PAGES; page++) {
         const response = await searchMonitors({ inputs: { page, per_page: MONITOR_PAGE_SIZE, query: 'muted:true' } });
         const batch = toArray<MonitorSearchResult>(response?.monitors);
-        batch.forEach((monitor) => {
-            const id = Number(monitor?.id);
-            if (Number.isInteger(id) && id > 0) ids.push(id);
+        batch.forEach((raw) => {
+            const monitor = raw ? slimMonitor(raw) : null;
+            if (monitor) monitors.push(monitor);
         });
         if (batch.length < MONITOR_PAGE_SIZE) break;
     }
-    return ids;
+    return monitors;
+}
+
+/**
+ * The fast first look (about a second): the monitors Datadog reports as muted,
+ * without their downtimes. The app shows these while the full snapshot, whose
+ * downtime list takes several seconds, is still loading.
+ */
+export async function loadMutedMonitors(): Promise<LiveSnapshot> {
+    const monitors = await listDatadogMutedMonitors();
+    return {
+        monitors,
+        downtimes: [],
+        datadogMutedIds: monitors.map((monitor) => monitor.id),
+        fetchedAt: new Date().toISOString(),
+        isPreview: true,
+    };
 }
 
 function toMonitorId(value: unknown): number | null {
@@ -144,7 +160,7 @@ function slimDowntime(downtime: EnrichedDowntimeV2): LiveDowntime {
 
 const USER_ID_PATTERN = /^[A-Za-z0-9-]{1,64}$/;
 const USER_BATCH_LIMIT = 50;
-const USER_LOOKUP_CONCURRENCY = 2;
+const USER_LOOKUP_CONCURRENCY = 3;
 
 
 function toUserSummary(userId: string, user: SimplifiedUser): UserSummary {
@@ -199,11 +215,12 @@ export async function resolveUsers(userIds: string[]): Promise<ResolvedUsers> {
  * same matching on this subset, so filters still operate on one dataset.
  */
 export async function loadMaintenanceSnapshot(): Promise<LiveSnapshot> {
-    const [monitors, downtimesResponse, datadogMutedIds] = await Promise.all([
+    const [monitors, downtimesResponse, mutedMonitors] = await Promise.all([
         listAllMonitors(),
         listDowntimesV2({ inputs: { current_only: true, page_limit: 1000 } }),
-        listDatadogMutedMonitorIds(),
+        listDatadogMutedMonitors(),
     ]);
+    const datadogMutedIds = mutedMonitors.map((monitor) => monitor.id);
     const nowMs = Date.now();
     const downtimes = toArray<EnrichedDowntimeV2>(downtimesResponse?.downtimes)
         .map(slimDowntime)

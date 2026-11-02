@@ -277,3 +277,54 @@ describe('buildCoverageRows with OR and NOT scopes', () => {
         }
     });
 });
+
+describe('fast matching', () => {
+    it('matches the same downtimes with direct ones indexed by monitor id, in the original order', () => {
+        const monitors = [monitor(1, ['env:prod', 'service:web']), monitor(2, ['env:prod']), monitor(3, ['env:dev'])];
+        const downtimes = [
+            downtime('scope', { scope: 'service:web' }),
+            downtime('direct-1', { monitorId: 1 }),
+            downtime('tags', { monitorTags: ['env:prod'] }),
+            downtime('direct-2', { monitorId: 2, scope: 'host:a' }),
+            downtime('wildcard', { monitorTags: ['env:pr*'] }),
+        ];
+        const byMonitor = Object.fromEntries(rows(monitors, downtimes).map((row) => [row.monitor.id, row.matches.map((m) => m.downtime.id)]));
+        assert.deepEqual(byMonitor[1], ['direct-1', 'tags', 'wildcard', 'scope']);
+        assert.deepEqual(byMonitor[2], ['direct-2', 'tags', 'wildcard']);
+        assert.equal(byMonitor[3], undefined);
+    });
+
+    it('matches tags case-insensitively, with and without wildcards', () => {
+        const [row] = rows([monitor(1, ['Env:Prod'])], [downtime('a', { monitorTags: ['env:prod'] }), downtime('b', { monitorTags: ['ENV:p?od'] })]);
+        assert.deepEqual(row.matches.map((m) => m.downtime.id).sort(), ['a', 'b']);
+    });
+});
+
+describe('creator names', () => {
+    const snapshot = (createdById: string | null): LiveSnapshot => ({
+        monitors: [monitor(1)],
+        downtimes: [downtime('d', { monitorId: 1, createdById })],
+        fetchedAt: new Date(NOW).toISOString(),
+    });
+    const label = (createdById: string | null, users = {}, unknown = new Set<string>()) =>
+        buildCoverageRows(snapshot(createdById), NOW, users, undefined, unknown)[0].primary.creatorLabel;
+
+    it('says "Resolving…" until Datadog has answered, and "Unknown user" only for users it says are gone', () => {
+        assert.equal(label('u1'), 'Resolving…');
+        assert.equal(label('u1', {}, new Set(['u1'])), 'Unknown user');
+        assert.equal(label('u1', { u1: { id: 'u1', name: 'Bo', handle: 'bo@x.io', email: null } }), 'Bo (bo@x.io)');
+        assert.equal(label(null), 'Unknown');
+    });
+});
+
+describe('the fast first look (preview)', () => {
+    it('shows muted monitors as loading until their downtimes arrive', () => {
+        const [row] = buildCoverageRows(
+            { monitors: [monitor(1)], downtimes: [], datadogMutedIds: [1], fetchedAt: new Date(NOW).toISOString(), isPreview: true },
+            NOW,
+        );
+        assert.equal(row.primary.downtime.isLoading, true);
+        assert.equal(row.primary.creatorLabel, 'Loading…');
+        assert.equal(isPlaceholderRow(row), true);
+    });
+});

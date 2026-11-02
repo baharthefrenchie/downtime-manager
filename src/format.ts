@@ -1,4 +1,4 @@
-import type { CoverageRow, DowntimeMatch, WindowState } from './coverage';
+import { STALE_AFTER_MS, type CoverageRow, type DowntimeMatch } from './coverage.ts';
 import type { CorrectionView } from './slo';
 
 type PillLevel = 'default' | 'success' | 'warning' | 'danger' | 'in-progress';
@@ -138,36 +138,12 @@ export function monitorStateLevel(state: string): PillLevel {
     }
 }
 
-export function maintenanceLevel(row: CoverageRow): PillLevel {
-    switch (row.maintenanceState) {
-        case 'Whole monitor':
-            return 'in-progress';
-        case 'Groups only':
-            return 'warning';
-        default:
-            return 'default';
-    }
-}
-
 export const MAINTENANCE_HINTS: Record<CoverageRow['maintenanceState'], string> = {
     'Whole monitor': 'Every group of this monitor is muted.',
     'Groups only': 'Only groups matching the downtime scope are muted.',
     'Not muting':
         'Datadog applies none of these downtimes to this monitor right now (for example, no current group matches the scope).',
 };
-
-export function windowLevel(state: WindowState): PillLevel {
-    switch (state) {
-        case 'Ending soon':
-            return 'warning';
-        case 'Stale':
-            return 'danger';
-        case 'Scheduled end':
-            return 'success';
-        default:
-            return 'default';
-    }
-}
 
 /** Compact duration such as `2d 4h`, `3h 12m`, `5m`, `1y 8mo`. */
 export function formatDuration(ms: number): string {
@@ -191,20 +167,6 @@ export function formatRelative(ms: number | null, nowMs: number): string | null 
     return ms >= nowMs ? `in ${formatDuration(ms - nowMs)}` : `${formatDuration(nowMs - ms)} ago`;
 }
 
-export function windowDetail(match: DowntimeMatch, state: WindowState, nowMs: number): string {
-    if (match.downtime.isPlaceholder) {
-        return 'Inspect to load from Datadog';
-    }
-    if (match.endMs !== null) {
-        return `Ends ${formatRelative(match.endMs, nowMs)}`;
-    }
-    const running = match.startMs !== null ? formatDuration(nowMs - match.startMs) : null;
-    if (state === 'Stale') {
-        return `No end date · running ${running}`;
-    }
-    return running ? `No end date · running ${running}` : 'No end date';
-}
-
 /** Human label for what the downtime silences: the whole monitor or specific groups. */
 export function mutedScopeLabel(match: DowntimeMatch): string {
     if (match.downtime.isPlaceholder) {
@@ -214,25 +176,77 @@ export function mutedScopeLabel(match: DowntimeMatch): string {
     return match.coversAllGroups || !scope || scope === '*' ? 'All groups' : scope;
 }
 
-export function matchKindLabel(match: DowntimeMatch): string {
-    switch (match.kind) {
-        case 'direct':
-            return 'Direct (monitor ID)';
-        case 'tag':
-            return 'Tag-based';
-        case 'scope':
-            return 'Scope-based';
+type TextTone = 'default' | 'secondary' | 'tertiary' | 'warning' | 'danger';
+
+/** "Ends" in plain words: when the primary downtime ends, colored only when it needs attention. */
+export function endsLabel(match: DowntimeMatch, nowMs: number): { text: string; title: string; tone: TextTone } {
+    if (match.downtime.isLoading) return { text: 'Loading…', title: 'Downtimes are still loading', tone: 'tertiary' };
+    if (match.downtime.isPlaceholder) {
+        return { text: 'Open to see', title: 'Muted by a downtime outside the downtime list (for example a host auto-mute)', tone: 'tertiary' };
     }
+    if (match.endMs !== null) {
+        const remaining = match.endMs - nowMs;
+        return {
+            text: `in ${formatDuration(Math.max(remaining, 0))}`,
+            title: `Ends ${formatEnd(match.endMs)}`,
+            tone: remaining <= ENDING_VERY_SOON_MS ? 'warning' : 'default',
+        };
+    }
+    const running = match.startMs !== null ? nowMs - match.startMs : null;
+    const isStale = running !== null && running > STALE_AFTER_MS;
+    return {
+        text: running !== null ? `No end · ${formatDuration(running)} so far` : 'No end',
+        title: 'Runs until someone cancels it',
+        tone: isStale ? 'warning' : 'tertiary',
+    };
 }
 
-export function coverageSummary(row: CoverageRow): string {
+/** Ends within the hour: the only end time the table colors. */
+export const ENDING_VERY_SOON_MS = 60 * 60_000;
+
+/** "Muted" in plain words: what is muted, and how the downtime reaches the monitor. */
+export function mutedLabel(row: CoverageRow): { what: string; isScope: boolean; how: string } {
+    const { primary } = row;
+    if (primary.downtime.isLoading) return { what: 'Loading…', isScope: false, how: '' };
+    if (primary.downtime.isPlaceholder) {
+        return { what: 'Some groups', isScope: false, how: 'outside the downtime list' };
+    }
+    const what = mutedScopeLabel(primary);
+    const how =
+        row.source === 'Direct + Tag/Scope'
+            ? 'by monitor ID and tags'
+            : primary.kind === 'direct'
+              ? 'by monitor ID'
+              : primary.kind === 'tag'
+                ? 'by monitor tags'
+                : 'by scope';
     const count = row.matches.length;
-    const direct = row.matches.filter((m) => m.kind === 'direct').length;
-    const indirect = count - direct;
-    const parts: string[] = [];
-    if (direct) parts.push(`${direct} direct`);
-    if (indirect) parts.push(`${indirect} tag/scope`);
-    return `${count} active ${count === 1 ? 'downtime' : 'downtimes'} (${parts.join(', ')})`;
+    return { what, isScope: what !== 'All groups', how: count > 1 ? `${how} · ${count} downtimes` : how };
+}
+
+/** Who set the downtimes, when it isn't just the monitor's owner (null when there's nothing to add). */
+export function downtimeSetBy(row: CoverageRow): string | null {
+    const others = row.downtimeCreators.filter(
+        (creator) =>
+            creator !== 'Resolving…' &&
+            creator !== 'Loading…' &&
+            !creator.startsWith('Unknown') &&
+            creator !== row.owner &&
+            !creator.startsWith(`${row.owner} (`),
+    );
+    return others.length > 0 ? `Downtime by ${others.join(', ')}` : null;
+}
+
+/** How a downtime reaches the monitor, in plain words ("By monitor ID"). */
+export function matchHowLabel(match: DowntimeMatch): string {
+    switch (match.kind) {
+        case 'direct':
+            return 'By monitor ID';
+        case 'tag':
+            return 'By monitor tags';
+        case 'scope':
+            return 'By scope';
+    }
 }
 
 export interface ExportRecord {
@@ -255,6 +269,17 @@ export interface ExportRecord {
     downtime_end: string;
     all_active_downtime_ids: string;
     related_slos: string;
+}
+
+/** How many active downtimes cover a row, by kind (for exports). */
+export function coverageSummary(row: CoverageRow): string {
+    const count = row.matches.length;
+    const direct = row.matches.filter((m) => m.kind === 'direct').length;
+    const indirect = count - direct;
+    const parts: string[] = [];
+    if (direct) parts.push(`${direct} direct`);
+    if (indirect) parts.push(`${indirect} tag/scope`);
+    return `${count} active ${count === 1 ? 'downtime' : 'downtimes'} (${parts.join(', ')})`;
 }
 
 export function toExportRecords(rows: CoverageRow[], relatedSloNames: Map<number, string[]> = new Map()): ExportRecord[] {
@@ -341,15 +366,18 @@ export function downloadFile(filename: string, content: string, mimeType: string
     }
 }
 
-export const PLACEHOLDER_ACTION_HINT = "Inspect this monitor first to load its downtimes from Datadog.";
+const PLACEHOLDER_ACTION_HINT = 'Open this monitor first to load its downtimes from Datadog.';
+const LOADING_ACTION_HINT = 'Downtimes are still loading.';
 
 /** Why a downtime can't be canceled from this app, or null if it can. */
 export function cancelBlockedReason(match: DowntimeMatch): string | null {
+    if (match.downtime.isLoading) return LOADING_ACTION_HINT;
     return match.downtime.isPlaceholder ? PLACEHOLDER_ACTION_HINT : null;
 }
 
 /** Why a downtime can't be extended from this app, or null if it can. */
 export function extendBlockedReason(match: DowntimeMatch): string | null {
+    if (match.downtime.isLoading) return LOADING_ACTION_HINT;
     if (match.downtime.isPlaceholder) {
         return PLACEHOLDER_ACTION_HINT;
     }

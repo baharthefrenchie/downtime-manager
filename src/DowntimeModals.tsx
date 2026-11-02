@@ -7,7 +7,15 @@ import { MessageBox } from '@datadog/druids/misc/MessageBox';
 import { Text } from '@datadog/druids/typography/Text';
 
 import type { CoverageRow, DowntimeMatch } from './coverage';
-import { extendBlockedReason, formatEnd, formatRelative, formatStart } from './format';
+import {
+    correctionTiming,
+    extendBlockedReason,
+    formatEnd,
+    formatRelative,
+    formatStart,
+    matchHowLabel,
+    mutedScopeLabel,
+} from './format';
 import {
     isTicked,
     LINK_TOLERANCE_MINUTES,
@@ -23,24 +31,17 @@ interface LinkedCorrectionsListProps {
     mode: 'extend' | 'cancel';
     /** The downtime's new end (extend only). */
     newEndMs: number;
+    nowMs: number;
     /** Corrections whose tick the user flipped from the default. */
     toggled: Set<string>;
     onToggle: (correctionId: string) => void;
 }
 
 /** "Also update these SLO corrections" checklist in the downtime extend and cancel dialogs. */
-function LinkedCorrectionsList({ state, mode, newEndMs, toggled, onToggle }: LinkedCorrectionsListProps) {
+function LinkedCorrectionsList({ state, mode, newEndMs, nowMs, toggled, onToggle }: LinkedCorrectionsListProps) {
     const heading = (
         <Text as="div" size="sm" weight="bold" marginTop="md" marginBottom="xxs">
-            Linked SLO corrections
-        </Text>
-    );
-    const scopeNote = (
-        <Text as="p" size="xs" variant="tertiary" marginBottom="xs">
-            One-time corrections on this downtime&apos;s related SLOs (or that Datadog created from its monitor tags)
-            whose window overlaps it. Those starting or ending within {LINK_TOLERANCE_MINUTES} minutes of the
-            downtime are ticked; tick any other one to change it too. Recurring corrections are never changed here;
-            edit them in Datadog.
+            {mode === 'extend' ? 'Also extend SLO corrections' : 'Also end SLO corrections'}
         </Text>
     );
     if (state.status === 'loading') {
@@ -62,56 +63,62 @@ function LinkedCorrectionsList({ state, mode, newEndMs, toggled, onToggle }: Lin
         );
     }
     const { linked, recurring } = state.corrections;
+    const rule =
+        `One-time corrections on this downtime's related SLOs (or created by Datadog from its monitor tags) whose window ` +
+        `overlaps it. Those that start or end within ${LINK_TOLERANCE_MINUTES} minutes of the downtime are ticked. ` +
+        'Recurring corrections are never changed here.';
     return (
         <>
             {heading}
-            {scopeNote}
             {linked.length === 0 ? (
-                <Text as="p" size="sm" variant="secondary">
-                    No linked one-time SLO correction. Only the downtime will change.
+                <Text as="p" size="sm" variant="secondary" title={rule}>
+                    None of this downtime&apos;s SLOs has a correction during it, so only the downtime changes.
                 </Text>
             ) : (
-                <div className="linked-corrections">
-                    {linked.map((item) => {
-                        const id = item.view.correction.id;
-                        const blocked = linkedBlockedReason(item, mode, newEndMs);
-                        const action =
-                            mode === 'extend'
-                                ? `Extend to ${formatEnd(newEndMs)}`
-                                : item.view.state === 'Scheduled'
-                                  ? "Delete (it hasn't started)"
-                                  : 'End now';
-                        return (
-                            <Checkbox
-                                key={id}
-                                isChecked={!blocked && isTicked(item, toggled)}
-                                isDisabled={Boolean(blocked)}
-                                onChange={() => onToggle(id)}
-                                label={
-                                    <span className="cell-stack">
-                                        <Text size="sm">{linkedCorrectionLabel(item)}</Text>
-                                        <Text size="xs" variant="tertiary">
-                                            {item.reason === 'from-downtime' ? 'Created from this downtime\'s tags · ' : ''}
-                                            {item.fit === 'overlaps' ? 'Overlaps this downtime · ' : ''}
-                                            {item.view.state} · {formatStart(item.view.startMs)} → {formatEnd(item.view.endMs)} ·{' '}
-                                            {blocked ?? action}
-                                        </Text>
-                                    </span>
-                                }
-                            />
-                        );
-                    })}
-                </div>
-            )}
-            {recurring.length > 0 && (
-                <Text as="p" size="xs" variant="tertiary" marginTop="xs">
-                    {recurring.length} recurring correction{recurring.length === 1 ? '' : 's'} on these SLOs{' '}
-                    {recurring.length === 1 ? "isn't" : "aren't"} changed.
-                </Text>
+                <>
+                    <Text as="p" size="xs" variant="tertiary" marginBottom="xs" title={rule}>
+                        Corrections that start or end with this downtime are ticked. Tick others to change them too.
+                    </Text>
+                    <div className="linked-corrections">
+                        {linked.map((item) => {
+                            const id = item.view.correction.id;
+                            const blocked = linkedBlockedReason(item, mode, newEndMs);
+                            const action =
+                                mode === 'extend'
+                                    ? `extends to ${formatEnd(newEndMs)}`
+                                    : item.view.state === 'Scheduled'
+                                      ? "deleted (it hasn't started)"
+                                      : 'ends now';
+                            const notes = [
+                                item.view.state === 'Active' ? correctionTiming(item.view, nowMs) : item.view.state,
+                                item.fit === 'overlaps' ? 'only overlaps this downtime' : null,
+                                item.reason === 'from-downtime' ? "created from this downtime's tags" : null,
+                                blocked ?? action,
+                            ].filter(Boolean);
+                            return (
+                                <Checkbox
+                                    key={id}
+                                    isChecked={!blocked && isTicked(item, toggled)}
+                                    isDisabled={Boolean(blocked)}
+                                    onChange={() => onToggle(id)}
+                                    label={
+                                        <span className="cell-stack">
+                                            <Text size="sm">{linkedCorrectionLabel(item)}</Text>
+                                            <Text size="xs" variant="tertiary">
+                                                {notes.join(' · ')}
+                                            </Text>
+                                        </span>
+                                    }
+                                />
+                            );
+                        })}
+                    </div>
+                </>
             )}
             <Text as="p" size="xs" variant="tertiary" marginTop="xs">
-                The downtime changes first, then each ticked correction. If a correction fails, the downtime change is
-                kept and the result lists what failed.
+                {recurring.length > 0 &&
+                    `${recurring.length} recurring correction${recurring.length === 1 ? '' : 's'} on these SLOs ${recurring.length === 1 ? "isn't" : "aren't"} changed. `}
+                {linked.length > 0 && 'The downtime changes first; if a correction then fails, the result says which.'}
             </Text>
         </>
     );
@@ -132,26 +139,25 @@ function useToggled() {
 interface CancelModalProps {
     target: { row: CoverageRow; match: DowntimeMatch };
     linked: LinkedCorrectionsState;
+    nowMs: number;
     isPending: boolean;
     error: string | null;
     onClose: () => void;
     onConfirm: (downtimeId: string, correctionIds: string[]) => void;
 }
 
-export function CancelDowntimeModal({ target, linked, isPending, error, onClose, onConfirm }: CancelModalProps) {
+export function CancelDowntimeModal({ target, linked, nowMs, isPending, error, onClose, onConfirm }: CancelModalProps) {
     const [toggled, toggle] = useToggled();
     const { row, match } = target;
-    const otherMonitorsNote =
-        match.kind === 'direct'
-            ? 'This downtime targets only this monitor.'
-            : 'This downtime is tag/scope-based and may also be muting other monitors. Canceling it un-mutes all of them.';
+    const what = mutedScopeLabel(match);
+    const others = row.matches.length - 1;
 
     return (
         <Modal
             isOpen
             onClose={onClose}
             size="md"
-            title="Cancel active downtime?"
+            title="Cancel this downtime?"
             hasFooterSeparator
             footer={
                 <div className="modal-footer-right">
@@ -166,25 +172,26 @@ export function CancelDowntimeModal({ target, linked, isPending, error, onClose,
                 </div>
             }
         >
-            <Text as="p" marginBottom="sm">
-                You are about to cancel downtime <Text isMonospace as="span">{match.downtime.id}</Text> covering{' '}
+            <Text as="p" marginBottom="xs">
+                Alerts from{' '}
                 <Text weight="bold" as="span">
                     {row.monitor.name}
-                </Text>
-                . Alerts will resume notifying immediately.
+                </Text>{' '}
+                start notifying again right away
+                {others > 0 ? `, except where ${others === 1 ? 'its other downtime still mutes' : `its ${others} other downtimes still mute`} it` : ''}.
             </Text>
-            <MessageBox level="warning" marginBottom="sm">
-                {otherMonitorsNote} Scope:{' '}
-                <Text isMonospace as="span">
-                    {match.downtime.scope || '*'}
-                </Text> · Ends: {formatEnd(match.endMs)}
-            </MessageBox>
-            {row.matches.length > 1 && (
-                <Text as="p" variant="secondary" size="sm" marginBottom="sm">
-                    {row.matches.length - 1} other active downtime(s) also cover this monitor and will remain in effect.
-                </Text>
+            <Text as="p" size="sm" variant="secondary" marginBottom="sm">
+                This downtime mutes{' '}
+                {what === 'All groups' ? 'all groups' : <Text isMonospace as="span" size="sm">{what}</Text>}{' '}
+                {matchHowLabel(match).replace(/^By/, 'by')} and {match.endMs === null ? 'has no end' : `ends ${formatEnd(match.endMs)}`}.
+            </Text>
+            {match.kind !== 'direct' && (
+                <MessageBox level="warning" marginBottom="sm">
+                    It mutes monitors by tags or scope, so it may also mute other monitors. Canceling it unmutes all of
+                    them.
+                </MessageBox>
             )}
-            <LinkedCorrectionsList state={linked} mode="cancel" newEndMs={0} toggled={toggled} onToggle={toggle} />
+            <LinkedCorrectionsList state={linked} mode="cancel" newEndMs={0} nowMs={nowMs} toggled={toggled} onToggle={toggle} />
             {error && (
                 <MessageBox level="danger" title="Cancel failed" marginTop="sm">
                     {error}
@@ -266,7 +273,7 @@ export function ExtendEndModal({
             }
         >
             <Text as="p" marginBottom="sm">
-                {subject} currently ends <Text weight="bold" as="span">{formatEnd(currentEndMs)}</Text> (
+                {subject} ends <Text weight="bold" as="span">{formatEnd(currentEndMs)}</Text> (
                 {formatRelative(currentEndMs, nowMs)}).
             </Text>
             {blockedReason ? (
@@ -286,7 +293,7 @@ export function ExtendEndModal({
                     </div>
                     <label className="extend-custom">
                         <Text size="sm" variant="secondary">
-                            Or pick a new end (your local time)
+                            Or pick the new end (your local time)
                         </Text>
                         <input
                             type="datetime-local"
@@ -328,10 +335,10 @@ export function ExtendDowntimeModal({ target, linked, nowMs, isPending, error, o
     const { row, match } = target;
     return (
         <ExtendEndModal
-            title="Extend active downtime"
+            title="Extend downtime"
             subject={
                 <>
-                    Downtime <Text isMonospace as="span">{match.downtime.id}</Text> on{' '}
+                    The downtime on{' '}
                     <Text weight="bold" as="span">
                         {row.monitor.name}
                     </Text>
@@ -340,7 +347,7 @@ export function ExtendDowntimeModal({ target, linked, nowMs, isPending, error, o
             currentEndMs={match.endMs}
             nowMs={nowMs}
             blockedReason={extendBlockedReason(match)}
-            unchangedNote="The scope and start stay unchanged."
+            unchangedNote="What it mutes and when it started stay the same."
             confirmLabel="Extend downtime"
             isPending={isPending}
             error={error}
@@ -349,7 +356,7 @@ export function ExtendDowntimeModal({ target, linked, nowMs, isPending, error, o
                 onConfirm(match.downtime.id, newEndIso, selectedCorrectionIds(linked, toggled, 'extend', Date.parse(newEndIso)))
             }
             renderExtra={(newEndMs) => (
-                <LinkedCorrectionsList state={linked} mode="extend" newEndMs={newEndMs} toggled={toggled} onToggle={toggle} />
+                <LinkedCorrectionsList state={linked} mode="extend" newEndMs={newEndMs} nowMs={nowMs} toggled={toggled} onToggle={toggle} />
             )}
         />
     );
@@ -382,7 +389,7 @@ export function ExtendCorrectionModal({ target, nowMs, isPending, error, onClose
             currentEndMs={view.endMs}
             nowMs={nowMs}
             blockedReason={correctionExtendBlockedReason(view)}
-            unchangedNote="The start stays unchanged."
+            unchangedNote="Its start stays the same."
             confirmLabel="Extend correction"
             isPending={isPending}
             error={error}
