@@ -10,7 +10,8 @@ import {
     correctionView,
     currentCorrections,
     downtimeRelatedSlos,
-    LINK_START_TOLERANCE_MS,
+    correctionFit,
+    LINK_TOLERANCE_MS,
     linkedCorrections,
     linkedExtendBlockedReason,
     queryMatchesMonitorTags,
@@ -222,24 +223,64 @@ describe('SLO corrections', () => {
 describe('corrections linked to a downtime', () => {
     const MIN = 60;
     const downtimeStartS = nowS - HOUR;
+    const downtimeEndS = nowS + 3 * HOUR;
     const gen2Slo = slo('gen2', { type: 'metric', tags: ['project:gen2'] });
     const otherSlo = slo('other', { type: 'metric', tags: ['project:gen3'] });
-    const at = (startMs: number | null, monitorTags: string[] = []) => ({ startMs, monitorTags });
+    const at = (startMs: number | null, monitorTags: string[] = [], endMs: number | null = downtimeEndS * 1000) => ({
+        startMs,
+        endMs,
+        monitorTags,
+    });
+    const linkedFits = (corrections: SloCorrectionSummary[], slos = [gen2Slo], downtime = at(downtimeStartS * 1000)) =>
+        linkedCorrections(downtime, slos, slos, corrections, NOW).linked.map((l) => `${l.view.correction.id}:${l.fit}`);
     const linkedIds = (corrections: SloCorrectionSummary[], slos = [gen2Slo]) =>
         linkedCorrections(at(downtimeStartS * 1000), slos, slos, corrections, NOW).linked.map((l) => l.view.correction.id);
 
-    it('links one-time corrections starting within 5 minutes of the downtime', () => {
-        assert.equal(LINK_START_TOLERANCE_MS, 5 * 60_000);
+    it('puts corrections starting or ending within 15 minutes of the downtime in its window', () => {
+        assert.equal(LINK_TOLERANCE_MS, 15 * 60_000);
         assert.deepEqual(
-            linkedIds([
+            linkedFits([
                 correction('exact', { sloId: 'gen2', start: downtimeStartS }),
-                correction('4m-early', { sloId: 'gen2', start: downtimeStartS - 4 * MIN }),
-                correction('5m-late', { sloId: 'gen2', start: downtimeStartS + 5 * MIN }),
-                correction('6m-late', { sloId: 'gen2', start: downtimeStartS + 6 * MIN }),
-                correction('1h-early', { sloId: 'gen2', start: downtimeStartS - HOUR }),
+                correction('14m-early', { sloId: 'gen2', start: downtimeStartS - 14 * MIN }),
+                correction('16m-late', { sloId: 'gen2', start: downtimeStartS + 16 * MIN }),
+                correction('same-end', { sloId: 'gen2', start: downtimeStartS - 5 * HOUR, end: downtimeEndS + 10 * MIN }),
             ]),
-            ['4m-early', 'exact', '5m-late'],
+            ['same-end:same-window', '14m-early:same-window', 'exact:same-window', '16m-late:overlaps'],
         );
+    });
+
+    it('links a whole-day correction to a downtime that ends with it (midnight to midnight)', () => {
+        // The reported case: a 2-hour downtime from 20:02:54Z, and corrections from 22:00Z the day before to 22:00Z.
+        const dtStart = Date.parse('2026-11-02T20:02:54Z');
+        const dtEnd = Date.parse('2026-11-02T22:02:54Z');
+        const day = { start: Date.parse('2026-11-01T22:00:00Z') / 1000, end: Date.parse('2026-11-02T22:00:00Z') / 1000 };
+        const result = linkedCorrections(
+            { startMs: dtStart, endMs: dtEnd, monitorTags: [] },
+            [gen2Slo],
+            [gen2Slo],
+            [correction('day', { sloId: 'gen2', ...day })],
+            dtStart + 4 * MIN * 1000,
+        );
+        assert.deepEqual(result.linked.map((l) => l.fit), ['same-window']);
+    });
+
+    it('lists corrections that only overlap the downtime, to be ticked by hand', () => {
+        assert.deepEqual(
+            linkedFits([correction('long', { sloId: 'gen2', start: downtimeStartS - 2 * HOUR, end: nowS + 10 * HOUR })]),
+            ['long:overlaps'],
+        );
+        // An open-ended downtime overlaps every correction that hasn't ended.
+        assert.deepEqual(
+            linkedFits([correction('later', { sloId: 'gen2', start: nowS + 5 * HOUR, end: nowS + 6 * HOUR })], [gen2Slo], at(downtimeStartS * 1000, [], null)),
+            ['later:overlaps'],
+        );
+    });
+
+    it('skips corrections outside the downtime window', () => {
+        assert.deepEqual(linkedIds([correction('after', { sloId: 'gen2', start: downtimeEndS, end: downtimeEndS + HOUR })]), []);
+        assert.deepEqual(linkedIds([correction('ended', { sloId: 'gen2', start: downtimeStartS, end: nowS - 60 })]), []);
+        assert.equal(correctionFit({ startMs: 1000, endMs: 2000 }, { startMs: 0, endMs: 1000 }), null);
+        assert.equal(correctionFit({ startMs: 1000, endMs: 2000 }, { startMs: null, endMs: 1500 }), null);
     });
 
     it('matches by SLO id or by a tag query on the related SLOs', () => {
@@ -261,10 +302,13 @@ describe('corrections linked to a downtime', () => {
     });
 
     it('links nothing when no correction matches', () => {
-        assert.deepEqual(linkedIds([correction('ended', { sloId: 'gen2', start: downtimeStartS, end: nowS - 60 })]), []);
         assert.deepEqual(linkedIds([correction('c', { sloId: 'gen2', start: downtimeStartS })], [otherSlo]), []);
         assert.deepEqual(linkedIds([correction('c', { sloId: 'gen2', start: downtimeStartS })], []), []);
-        assert.deepEqual(linkedCorrections(at(null), [gen2Slo], [gen2Slo], [correction('c', { sloId: 'gen2' })], NOW).linked, []);
+        // A downtime without a start can still overlap, but never shares a start.
+        assert.deepEqual(
+            linkedFits([correction('c', { sloId: 'gen2' })], [gen2Slo], at(null)),
+            ['c:overlaps'],
+        );
     });
 
     it('uses the SLOs related through that downtime only', () => {
@@ -291,7 +335,7 @@ describe('corrections created from a downtime in Datadog', () => {
     const fromDowntime = (overrides: Partial<SloCorrectionSummary> = {}) =>
         correction('dd', { sloId: null, sloQuery: 'service:web-store env:prod', start: startS, ...overrides });
     const link = (correctionList: SloCorrectionSummary[], related: SloSummary[] = []) =>
-        linkedCorrections({ startMs: startS * 1000, monitorTags: tags }, related, [countSlo], correctionList, NOW).linked;
+        linkedCorrections({ startMs: startS * 1000, endMs: nowS * 1000 + 3 * HOUR * 1000, monitorTags: tags }, related, [countSlo], correctionList, NOW).linked;
 
     it('matches a query equal to the monitor tags, in any order and case', () => {
         assert.equal(queryMatchesMonitorTags('service:web-store env:prod', tags), true);
@@ -308,8 +352,8 @@ describe('corrections created from a downtime in Datadog', () => {
         assert.deepEqual(item.slos.map((s) => s.id), ['count']);
     });
 
-    it('still requires a matching start, and ignores other queries and single-SLO corrections', () => {
-        assert.deepEqual(link([fromDowntime({ start: startS + 10 * 60 })]), []);
+    it('ticks it only in the same window, and ignores other queries and single-SLO corrections', () => {
+        assert.deepEqual(link([fromDowntime({ start: startS + 20 * 60 })]).map((l) => l.fit), ['overlaps']);
         assert.deepEqual(link([fromDowntime({ sloQuery: 'service:checkout env:prod' })]), []);
         assert.deepEqual(link([correction('by-id', { sloId: 'count', start: startS })]), []);
     });

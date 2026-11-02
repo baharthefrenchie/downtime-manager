@@ -21,12 +21,14 @@ active downtimes, using live data from the Datadog org it runs in.
 - **Actions:** inspect (side panel with raw get-downtime JSON), **extend** and **cancel**. Both
   re-read the downtime live and refuse if it is no longer active.
 - **Downtime and its SLO corrections together:** the extend and cancel dialogs list the SLO
-  corrections linked to the downtime, all ticked by default. A correction is linked when it is
-  one-time, hasn't ended, starts within 5 minutes of the downtime's start, and either targets one
-  of the downtime's related SLOs (by SLO or by tag query), or is the tag-based correction Datadog
-  creates from the downtime editor (**Preview SLO Correction**), whose query is the downtime's
-  monitor tags. Extending moves each ticked correction to the
-  same new end; canceling ends an active correction now, or deletes one that hasn't started. The
+  corrections linked to the downtime. A correction is linked when it is one-time, hasn't ended,
+  its window overlaps the downtime's, and it either targets one of the downtime's related SLOs (by
+  SLO or by tag query), or is the tag-based correction Datadog creates from the downtime editor
+  (**Preview SLO Correction**), whose query is the downtime's monitor tags. Corrections that start
+  or end within 15 minutes of the downtime (the same maintenance window, such as a whole-day
+  correction for a downtime ending at midnight) are ticked by default; others that merely overlap
+  are listed unticked, so a long-running correction only changes if you tick it. Extending moves
+  each ticked correction to the same new end; canceling ends an active correction now, or deletes one that hasn't started. The
   downtime changes first, then each correction; the result lists what succeeded and what failed,
   and a failed correction never rolls back the downtime change. Recurring corrections are never
   changed here (the dialog says how many there are); edit them in Datadog.

@@ -200,8 +200,11 @@ export function correctionCancelBlockedReason(view: CorrectionView): string | nu
     return null;
 }
 
-/** How close a correction's start must be to the downtime's start to count as its correction. */
-export const LINK_START_TOLERANCE_MS = 5 * 60_000;
+/**
+ * How close a correction's start or end must be to the downtime's for the two to
+ * count as one maintenance window (and the correction to be ticked by default).
+ */
+export const LINK_TOLERANCE_MS = 15 * 60_000;
 
 export interface LinkedCorrection {
     view: CorrectionView;
@@ -213,11 +216,20 @@ export interface LinkedCorrection {
      * monitor tags, as Datadog creates from the downtime editor.
      */
     reason: 'related-slo' | 'from-downtime';
+    /**
+     * `same-window`: starts or ends within {@link LINK_TOLERANCE_MS} of the
+     * downtime, so it changes with it by default.
+     * `overlaps`: only overlaps the downtime's window; listed, but changed only
+     * when the user ticks it.
+     */
+    fit: 'same-window' | 'overlaps';
 }
 
 /** The parts of a downtime that link corrections to it. */
 export interface DowntimeForLinking {
     startMs: number | null;
+    /** null: the downtime has no end. */
+    endMs: number | null;
     monitorTags: string[];
 }
 
@@ -238,7 +250,7 @@ export function queryMatchesMonitorTags(query: string | null, monitorTags: strin
 }
 
 export interface DowntimeCorrections {
-    /** One-time corrections that start with the downtime (within 5 minutes) on its related SLOs. */
+    /** One-time corrections on its related SLOs whose window overlaps the downtime's. */
     linked: LinkedCorrection[];
     /** Recurring corrections on the same SLOs: out of scope, edited in Datadog. */
     recurring: LinkedCorrection[];
@@ -269,10 +281,23 @@ export function downtimeRelatedSlos(
     return [...byId.values()];
 }
 
+/** How a correction's window relates to the downtime's, or null if they don't overlap. */
+export function correctionFit(
+    downtime: Pick<DowntimeForLinking, 'startMs' | 'endMs'>,
+    correction: Pick<CorrectionView, 'startMs' | 'endMs'>,
+): LinkedCorrection['fit'] | null {
+    if (correction.startMs === null) return null;
+    const downtimeStart = downtime.startMs ?? Number.NEGATIVE_INFINITY;
+    const downtimeEnd = downtime.endMs ?? Number.POSITIVE_INFINITY;
+    const correctionEnd = correction.endMs ?? Number.POSITIVE_INFINITY;
+    if (correction.startMs >= downtimeEnd || correctionEnd <= downtimeStart) return null;
+    const near = (a: number | null, b: number | null) => a !== null && b !== null && Math.abs(a - b) <= LINK_TOLERANCE_MS;
+    return near(correction.startMs, downtime.startMs) || near(correction.endMs, downtime.endMs) ? 'same-window' : 'overlaps';
+}
+
 /**
  * The SLO corrections linked to a downtime: one-time corrections, not ended,
- * whose start is within {@link LINK_START_TOLERANCE_MS} of the downtime's
- * start, and that either
+ * whose window overlaps the downtime's (see {@link correctionFit}), and that either
  * - target one of the downtime's related SLOs (by id or tag query), or
  * - are tag-based with the downtime's monitor tags as their query (created
  *   from the downtime in Datadog), whichever SLOs that query matches.
@@ -298,14 +323,18 @@ export function linkedCorrections(
         }
         const view = correctionView(correction, nowMs);
         if (view.state === 'Recurring') {
-            recurring.push({ view, slos, reason });
+            recurring.push({ view, slos, reason, fit: 'overlaps' });
             continue;
         }
-        if (view.state === 'Ended' || downtime.startMs === null || view.startMs === null) continue;
-        if (Math.abs(view.startMs - downtime.startMs) <= LINK_START_TOLERANCE_MS) linked.push({ view, slos, reason });
+        if (view.state === 'Ended') continue;
+        const fit = correctionFit(downtime, view);
+        if (fit) linked.push({ view, slos, reason, fit });
     }
     const byStart = (a: LinkedCorrection, b: LinkedCorrection) => (a.view.startMs ?? 0) - (b.view.startMs ?? 0);
-    return { linked: linked.sort(byStart), recurring: recurring.sort(byStart) };
+    // Same-window corrections first: they're the ones that change by default.
+    const byFit = (a: LinkedCorrection, b: LinkedCorrection) =>
+        Number(a.fit === 'overlaps') - Number(b.fit === 'overlaps') || byStart(a, b);
+    return { linked: linked.sort(byFit), recurring: recurring.sort(byStart) };
 }
 
 /** Why a linked correction can't be moved to `newEndMs` with its downtime, or null if it can. */

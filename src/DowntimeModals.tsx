@@ -9,6 +9,8 @@ import { Text } from '@datadog/druids/typography/Text';
 import type { CoverageRow, DowntimeMatch } from './coverage';
 import { extendBlockedReason, formatEnd, formatRelative, formatStart } from './format';
 import {
+    isTicked,
+    LINK_TOLERANCE_MINUTES,
     linkedBlockedReason,
     linkedCorrectionLabel,
     selectedCorrectionIds,
@@ -21,12 +23,13 @@ interface LinkedCorrectionsListProps {
     mode: 'extend' | 'cancel';
     /** The downtime's new end (extend only). */
     newEndMs: number;
-    unticked: Set<string>;
-    onToggle: (correctionId: string, isTicked: boolean) => void;
+    /** Corrections whose tick the user flipped from the default. */
+    toggled: Set<string>;
+    onToggle: (correctionId: string) => void;
 }
 
 /** "Also update these SLO corrections" checklist in the downtime extend and cancel dialogs. */
-function LinkedCorrectionsList({ state, mode, newEndMs, unticked, onToggle }: LinkedCorrectionsListProps) {
+function LinkedCorrectionsList({ state, mode, newEndMs, toggled, onToggle }: LinkedCorrectionsListProps) {
     const heading = (
         <Text as="div" size="sm" weight="bold" marginTop="md" marginBottom="xxs">
             Linked SLO corrections
@@ -34,9 +37,10 @@ function LinkedCorrectionsList({ state, mode, newEndMs, unticked, onToggle }: Li
     );
     const scopeNote = (
         <Text as="p" size="xs" variant="tertiary" marginBottom="xs">
-            One-time corrections that start within 5 minutes of this downtime and target its related SLOs, or that
-            Datadog created from its monitor tags. Recurring corrections are never changed here; edit them in
-            Datadog.
+            One-time corrections on this downtime&apos;s related SLOs (or that Datadog created from its monitor tags)
+            whose window overlaps it. Those starting or ending within {LINK_TOLERANCE_MINUTES} minutes of the
+            downtime are ticked; tick any other one to change it too. Recurring corrections are never changed here;
+            edit them in Datadog.
         </Text>
     );
     if (state.status === 'loading') {
@@ -80,14 +84,15 @@ function LinkedCorrectionsList({ state, mode, newEndMs, unticked, onToggle }: Li
                         return (
                             <Checkbox
                                 key={id}
-                                isChecked={!blocked && !unticked.has(id)}
+                                isChecked={!blocked && isTicked(item, toggled)}
                                 isDisabled={Boolean(blocked)}
-                                onChange={(event) => onToggle(id, event.target.checked)}
+                                onChange={() => onToggle(id)}
                                 label={
                                     <span className="cell-stack">
                                         <Text size="sm">{linkedCorrectionLabel(item)}</Text>
                                         <Text size="xs" variant="tertiary">
                                             {item.reason === 'from-downtime' ? 'Created from this downtime\'s tags · ' : ''}
+                                            {item.fit === 'overlaps' ? 'Overlaps this downtime · ' : ''}
                                             {item.view.state} · {formatStart(item.view.startMs)} → {formatEnd(item.view.endMs)} ·{' '}
                                             {blocked ?? action}
                                         </Text>
@@ -112,16 +117,16 @@ function LinkedCorrectionsList({ state, mode, newEndMs, unticked, onToggle }: Li
     );
 }
 
-function useUnticked() {
-    const [unticked, setUnticked] = useState<Set<string>>(() => new Set());
-    const toggle = (id: string, isTicked: boolean) =>
-        setUnticked((previous) => {
+function useToggled() {
+    const [toggled, setToggled] = useState<Set<string>>(() => new Set());
+    const toggle = (id: string) =>
+        setToggled((previous) => {
             const next = new Set(previous);
-            if (isTicked) next.delete(id);
+            if (next.has(id)) next.delete(id);
             else next.add(id);
             return next;
         });
-    return [unticked, toggle] as const;
+    return [toggled, toggle] as const;
 }
 
 interface CancelModalProps {
@@ -134,7 +139,7 @@ interface CancelModalProps {
 }
 
 export function CancelDowntimeModal({ target, linked, isPending, error, onClose, onConfirm }: CancelModalProps) {
-    const [unticked, toggle] = useUnticked();
+    const [toggled, toggle] = useToggled();
     const { row, match } = target;
     const otherMonitorsNote =
         match.kind === 'direct'
@@ -156,7 +161,7 @@ export function CancelDowntimeModal({ target, linked, isPending, error, onClose,
                         isPrimary
                         label="Cancel downtime"
                         isLoading={isPending}
-                        onClick={() => onConfirm(match.downtime.id, selectedCorrectionIds(linked, unticked, 'cancel', 0))}
+                        onClick={() => onConfirm(match.downtime.id, selectedCorrectionIds(linked, toggled, 'cancel', 0))}
                     />
                 </div>
             }
@@ -179,7 +184,7 @@ export function CancelDowntimeModal({ target, linked, isPending, error, onClose,
                     {row.matches.length - 1} other active downtime(s) also cover this monitor and will remain in effect.
                 </Text>
             )}
-            <LinkedCorrectionsList state={linked} mode="cancel" newEndMs={0} unticked={unticked} onToggle={toggle} />
+            <LinkedCorrectionsList state={linked} mode="cancel" newEndMs={0} toggled={toggled} onToggle={toggle} />
             {error && (
                 <MessageBox level="danger" title="Cancel failed" marginTop="sm">
                     {error}
@@ -319,7 +324,7 @@ interface ExtendModalProps {
 }
 
 export function ExtendDowntimeModal({ target, linked, nowMs, isPending, error, onClose, onConfirm }: ExtendModalProps) {
-    const [unticked, toggle] = useUnticked();
+    const [toggled, toggle] = useToggled();
     const { row, match } = target;
     return (
         <ExtendEndModal
@@ -341,10 +346,10 @@ export function ExtendDowntimeModal({ target, linked, nowMs, isPending, error, o
             error={error}
             onClose={onClose}
             onConfirm={(newEndIso) =>
-                onConfirm(match.downtime.id, newEndIso, selectedCorrectionIds(linked, unticked, 'extend', Date.parse(newEndIso)))
+                onConfirm(match.downtime.id, newEndIso, selectedCorrectionIds(linked, toggled, 'extend', Date.parse(newEndIso)))
             }
             renderExtra={(newEndMs) => (
-                <LinkedCorrectionsList state={linked} mode="extend" newEndMs={newEndMs} unticked={unticked} onToggle={toggle} />
+                <LinkedCorrectionsList state={linked} mode="extend" newEndMs={newEndMs} toggled={toggled} onToggle={toggle} />
             )}
         />
     );
