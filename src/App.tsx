@@ -52,6 +52,8 @@ import { useDensity, useUrlFilters, type Density } from './hooks';
 import { useCreatorNames } from './useCreatorNames';
 import type { CorrectionTarget } from './DowntimeModals';
 import { cancelSloCorrection, extendSloCorrection } from './slo.backend';
+import { SearchBar } from './SearchBar';
+import { parseQuery, rowMatchesQuery } from './search';
 import { SloCorrectionsView } from './SloCorrectionsView';
 import { correctionRowsFor, SLO_QUERY_KEY, useSloData, type CorrectionRow } from './useSloData';
 import {
@@ -197,9 +199,13 @@ function App() {
         return [...names].sort((a, b) => a.localeCompare(b)).map((name) => ({ label: name, value: name }));
     }, [rows]);
 
+    const parsedQuery = useMemo(() => parseQuery(filters.q), [filters.q]);
+    const onQueryChange = useCallback((q: string) => setFilters({ q }), [setFilters]);
+
     const filteredRows = useMemo(
         () =>
             rows.filter((row) => {
+                if (!rowMatchesQuery(row, parsedQuery)) return false;
                 if (
                     filters.owners.length > 0 &&
                     !filters.owners.includes(row.owner) &&
@@ -220,6 +226,7 @@ function App() {
             }),
         [
             rows,
+            parsedQuery,
             filters.owners,
             filters.withSlos,
             relatedByMonitor,
@@ -669,6 +676,7 @@ function App() {
     const isNarrow = density === 'narrow';
     const isCompact = density === 'narrow' || density === 'medium';
     const hasFilters =
+        filters.q.trim() !== '' ||
         filters.owners.length > 0 ||
         maintenanceFilter !== 'all' ||
         windowFilter !== 'all' ||
@@ -775,6 +783,7 @@ function App() {
             </Grid>
 
             <section className="surface toolbar" aria-label="Filters">
+                <SearchBar value={filters.q} rows={rows} onChange={onQueryChange} />
                 <div className="toolbar-group">
                     {isNarrow ? (
                         <Select
@@ -845,7 +854,15 @@ function App() {
                             isNaked
                             label="Clear filters"
                             onClick={() =>
-                                setFilters({ state: 'all', window: 'all', owners: [], from: null, to: null, withSlos: false })
+                                setFilters({
+                                    q: '',
+                                    state: 'all',
+                                    window: 'all',
+                                    owners: [],
+                                    from: null,
+                                    to: null,
+                                    withSlos: false,
+                                })
                             }
                         />
                     )}
@@ -903,7 +920,12 @@ function App() {
                             hasPageSizeSelector: !isNarrow,
                         }}
                         emptyState={{
-                            title: rows.length === 0 ? 'No monitors are in maintenance' : 'No monitors match these filters',
+                            title:
+                                rows.length === 0
+                                    ? 'No monitors are in maintenance'
+                                    : filters.q.trim()
+                                      ? `No monitors match "${filters.q.trim()}"`
+                                      : 'No monitors match these filters',
                             subtitle:
                                 rows.length === 0
                                     ? 'No validated active downtime currently covers a monitor in this org.'

@@ -22,6 +22,11 @@ active downtimes, using live data from the Datadog org it runs in.
   with relative times. Open-ended downtimes show *Indefinitely*.
 - **Actions:** inspect (side panel with raw get-downtime JSON), **extend** and **cancel**. Both
   re-read the downtime live and refuse if it is no longer active.
+- **Search:** a Datadog-style search bar. Free text matches monitor names (or an ID), and `key:value`
+  matches monitor tags, with `*` wildcards, `-` or `NOT` to exclude, and `OR` between terms (AND is
+  the default). Reserved keys: `id`, `name`, `type`, `status`, `owner`, `creator`, `scope`,
+  `downtime`, `message`; use `tag:key:value` for a tag that shares a reserved name. Keys and values
+  are suggested as you type.
 - **Filters:** maintenance state, window, owner/creator, and downtime start date. Filters live in the
   URL, so filtered views are shareable. Export the filtered rows to CSV or JSON.
 - **Related SLOs:** for each monitor in maintenance, the SLOs it affects. These are monitor-based
