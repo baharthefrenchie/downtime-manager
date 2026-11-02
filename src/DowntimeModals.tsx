@@ -34,8 +34,9 @@ function LinkedCorrectionsList({ state, mode, newEndMs, unticked, onToggle }: Li
     );
     const scopeNote = (
         <Text as="p" size="xs" variant="tertiary" marginBottom="xs">
-            One-time corrections on this downtime&apos;s related SLOs that start within 5 minutes of it. Recurring
-            corrections are never changed here; edit them in Datadog.
+            One-time corrections that start within 5 minutes of this downtime and target its related SLOs, or that
+            Datadog created from its monitor tags. Recurring corrections are never changed here; edit them in
+            Datadog.
         </Text>
     );
     if (state.status === 'loading') {
@@ -86,6 +87,7 @@ function LinkedCorrectionsList({ state, mode, newEndMs, unticked, onToggle }: Li
                                     <span className="cell-stack">
                                         <Text size="sm">{linkedCorrectionLabel(item)}</Text>
                                         <Text size="xs" variant="tertiary">
+                                            {item.reason === 'from-downtime' ? 'Created from this downtime\'s tags · ' : ''}
                                             {item.view.state} · {formatStart(item.view.startMs)} → {formatEnd(item.view.endMs)} ·{' '}
                                             {blocked ?? action}
                                         </Text>

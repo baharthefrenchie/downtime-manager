@@ -3,7 +3,7 @@
  * time windows) that apply to them. Pure logic; Datadog calls live in
  * slo.backend.ts.
  */
-import { evaluateScope, parseScope, positiveTerms, tagMatches, toValidMs, type CoverageRow } from './coverage.ts';
+import { evaluateScope, parseScope, positiveTerms, tagMatches, toValidMs, type CoverageRow, type ScopeExpr } from './coverage.ts';
 
 export interface SloSummary {
     id: string;
@@ -47,7 +47,16 @@ export interface SloContext {
 export type SloRelation = 'Monitor-based SLO' | 'Shares downtime scope' | 'Shares downtime tags';
 
 /**
- * How tag/scope-based downtimes relate to SLOs:
+ * Monitor-based SLOs are computed from their own monitors, so a downtime only
+ * affects them through those monitors. Count-based (`metric`) and time-slice
+ * SLOs have no monitors and are related by tags.
+ */
+export function isMonitorBasedSlo(slo: Pick<SloSummary, 'type'>): boolean {
+    return slo.type === 'monitor';
+}
+
+/**
+ * How downtimes relate to count-based and time-slice SLOs:
  * - `scope` (default): an SLO carrying the downtime's group scope (its positive
  *   terms) is related; monitor tags aren't required. When the scope is `*` or
  *   only exclusions, the downtime's monitor tags are used instead.
@@ -86,10 +95,17 @@ function downtimeRelation(
     scope: string | null,
     sloTags: string[],
     mode: SloMatchMode,
+    /**
+     * For downtimes on a monitor ID, whose scope only filters groups: an
+     * environment alone (`env:dev`) says nothing about the service affected,
+     * so at least one other term is required.
+     */
+    requireNonEnvTerm = false,
 ): Pick<RelatedSlo, 'relation' | 'matchedTags'> | null {
     const expr = parseScope(scope);
     const scopeTerms = positiveTerms(expr);
     const tags = concreteTags(monitorTags);
+    if (requireNonEnvTerm && [...tags, ...scopeTerms].every((term) => /^env:/i.test(term))) return null;
     const scopeOk = scopeTerms.length === 0 || evaluateScope(expr, sloTags, { ignoreNegations: true });
     const matchedScope = scopeTerms.filter((term) => tagMatches(term, sloTags));
 
@@ -103,26 +119,38 @@ function downtimeRelation(
 }
 
 /**
- * SLOs related to a monitor in maintenance:
- * - monitor-based SLOs that use the monitor (any coverage source);
- * - for tag/scope coverage, SLOs matching one of the downtimes that covers the
- *   monitor, by its group scope (default) or, in strict mode, by every monitor
- *   tag and the scope. See {@link SloMatchMode}.
+ * SLOs related to a monitor in maintenance, by SLO type:
+ * - monitor-based SLOs: only those that use the monitor (whatever the downtime
+ *   type). One built on other monitors isn't affected, even if its tags match;
+ * - count-based and time-slice SLOs: those matching one of the downtimes that
+ *   covers the monitor, by its group scope (default) or, in strict mode, by
+ *   every monitor tag and the scope. See {@link SloMatchMode}. This includes
+ *   downtimes on a monitor ID with a group scope, as long as the scope names
+ *   more than an environment; a whole-monitor downtime on a monitor ID carries
+ *   no tags, so it relates no count-based SLO.
  */
 export function relatedSlos(row: CoverageRow, slos: SloSummary[], mode: SloMatchMode = 'scope'): RelatedSlo[] {
     const related = new Map<string, RelatedSlo>();
     for (const slo of slos) {
-        if (slo.monitorIds.includes(row.monitor.id)) {
-            related.set(slo.id, { slo, relation: 'Monitor-based SLO', matchedTags: [] });
+        if (isMonitorBasedSlo(slo)) {
+            if (slo.monitorIds.includes(row.monitor.id)) {
+                related.set(slo.id, { slo, relation: 'Monitor-based SLO', matchedTags: [] });
+            }
+            continue;
         }
-    }
-    if (row.source !== 'Direct (monitor ID)') {
+        if (slo.tags.length === 0) continue;
         for (const match of row.matches) {
-            if (match.kind === 'direct' || match.downtime.isPlaceholder) continue;
-            for (const slo of slos) {
-                if (related.has(slo.id) || slo.tags.length === 0) continue;
-                const relation = downtimeRelation(match.downtime.monitorTags, match.downtime.scope, slo.tags, mode);
-                if (relation) related.set(slo.id, { slo, ...relation });
+            if (match.downtime.isPlaceholder) continue;
+            const relation = downtimeRelation(
+                match.downtime.monitorTags,
+                match.downtime.scope,
+                slo.tags,
+                mode,
+                match.kind === 'direct',
+            );
+            if (relation) {
+                related.set(slo.id, { slo, ...relation });
+                break;
             }
         }
     }
@@ -177,8 +205,36 @@ export const LINK_START_TOLERANCE_MS = 5 * 60_000;
 
 export interface LinkedCorrection {
     view: CorrectionView;
-    /** The downtime's related SLOs this correction applies to. */
+    /** The SLOs this correction applies to (the downtime's related SLOs, or every SLO its query matches). */
     slos: SloSummary[];
+    /**
+     * `related-slo`: it targets one of the downtime's related SLOs.
+     * `from-downtime`: a tag-based correction whose query is the downtime's
+     * monitor tags, as Datadog creates from the downtime editor.
+     */
+    reason: 'related-slo' | 'from-downtime';
+}
+
+/** The parts of a downtime that link corrections to it. */
+export interface DowntimeForLinking {
+    startMs: number | null;
+    monitorTags: string[];
+}
+
+/**
+ * True when a tag query is exactly the downtime's monitor tags (any order,
+ * case-insensitive), which is how Datadog fills in a correction created from
+ * the downtime editor ("Preview SLO Correction").
+ */
+export function queryMatchesMonitorTags(query: string | null, monitorTags: string[]): boolean {
+    const tags = concreteTags(monitorTags).map((tag) => tag.toLowerCase());
+    if (!query || tags.length === 0) return false;
+    const expr = parseScope(query);
+    const onlyAnd = (node: ScopeExpr): boolean =>
+        node.type === 'term' || (node.type === 'and' && node.children.every(onlyAnd));
+    if (!onlyAnd(expr)) return false;
+    const terms = new Set(positiveTerms(expr).map((term) => term.toLowerCase()));
+    return terms.size === new Set(tags).size && tags.every((tag) => terms.has(tag));
 }
 
 export interface DowntimeCorrections {
@@ -216,29 +272,37 @@ export function downtimeRelatedSlos(
 /**
  * The SLO corrections linked to a downtime: one-time corrections, not ended,
  * whose start is within {@link LINK_START_TOLERANCE_MS} of the downtime's
- * start, and whose SLO (or tag query) matches one of the downtime's related
- * SLOs. Recurring corrections on those SLOs are returned separately and never
+ * start, and that either
+ * - target one of the downtime's related SLOs (by id or tag query), or
+ * - are tag-based with the downtime's monitor tags as their query (created
+ *   from the downtime in Datadog), whichever SLOs that query matches.
+ * Recurring corrections that would match are returned separately and never
  * changed.
  */
 export function linkedCorrections(
-    downtimeStartMs: number | null,
+    downtime: DowntimeForLinking,
     downtimeSlos: SloSummary[],
+    allSlos: SloSummary[],
     corrections: SloCorrectionSummary[],
     nowMs: number,
 ): DowntimeCorrections {
     const linked: LinkedCorrection[] = [];
     const recurring: LinkedCorrection[] = [];
-    if (downtimeSlos.length === 0) return { linked, recurring };
     for (const correction of corrections) {
-        const slos = downtimeSlos.filter((slo) => correctionAppliesTo(correction, slo));
-        if (slos.length === 0) continue;
+        let reason: LinkedCorrection['reason'] = 'related-slo';
+        let slos = downtimeSlos.filter((slo) => correctionAppliesTo(correction, slo));
+        if (slos.length === 0) {
+            if (correction.sloId || !queryMatchesMonitorTags(correction.sloQuery, downtime.monitorTags)) continue;
+            reason = 'from-downtime';
+            slos = allSlos.filter((slo) => correctionAppliesTo(correction, slo));
+        }
         const view = correctionView(correction, nowMs);
         if (view.state === 'Recurring') {
-            recurring.push({ view, slos });
+            recurring.push({ view, slos, reason });
             continue;
         }
-        if (view.state === 'Ended' || downtimeStartMs === null || view.startMs === null) continue;
-        if (Math.abs(view.startMs - downtimeStartMs) <= LINK_START_TOLERANCE_MS) linked.push({ view, slos });
+        if (view.state === 'Ended' || downtime.startMs === null || view.startMs === null) continue;
+        if (Math.abs(view.startMs - downtime.startMs) <= LINK_START_TOLERANCE_MS) linked.push({ view, slos, reason });
     }
     const byStart = (a: LinkedCorrection, b: LinkedCorrection) => (a.view.startMs ?? 0) - (b.view.startMs ?? 0);
     return { linked: linked.sort(byStart), recurring: recurring.sort(byStart) };

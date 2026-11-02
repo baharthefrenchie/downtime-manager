@@ -22,8 +22,10 @@ active downtimes, using live data from the Datadog org it runs in.
   re-read the downtime live and refuse if it is no longer active.
 - **Downtime and its SLO corrections together:** the extend and cancel dialogs list the SLO
   corrections linked to the downtime, all ticked by default. A correction is linked when it is
-  one-time, hasn't ended, starts within 5 minutes of the downtime's start, and targets one of the
-  downtime's related SLOs (by SLO or by tag query). Extending moves each ticked correction to the
+  one-time, hasn't ended, starts within 5 minutes of the downtime's start, and either targets one
+  of the downtime's related SLOs (by SLO or by tag query), or is the tag-based correction Datadog
+  creates from the downtime editor (**Preview SLO Correction**), whose query is the downtime's
+  monitor tags. Extending moves each ticked correction to the
   same new end; canceling ends an active correction now, or deletes one that hasn't started. The
   downtime changes first, then each correction; the result lists what succeeded and what failed,
   and a failed correction never rolls back the downtime change. Recurring corrections are never
@@ -41,15 +43,21 @@ active downtimes, using live data from the Datadog org it runs in.
 - **Filters:** maintenance state, window, owner/creator, and downtime start date. Filters live in the
   URL, so filtered views are shareable. Export the filtered rows to CSV or JSON.
 - **Related SLOs:** for each monitor in maintenance, the SLOs it affects, each with its SLI, error
-  budget and current corrections:
-  - Monitor-based SLOs that use the monitor are always related.
-  - For tag/scope-based downtimes, an SLO is related when it carries the downtime's **group scope**.
-    A downtime on monitor tags `env:prod` with scope `project:gen2` relates every SLO tagged
-    `project:gen2`, whether or not it's tagged `env:prod`. `OR` scopes relate SLOs carrying either
-    side, and excluded terms (`-project:x`, `NOT project:x`) are never required. When the scope is
-    `*` (or only exclusions), the downtime's monitor tags are used instead.
+  budget and current corrections. How an SLO is related depends on its type:
+  - **Monitor-based SLOs** are computed from their own monitors, so they are related only when they
+    use a monitor the downtime mutes, whatever the downtime type. One built on other monitors isn't
+    affected, even when its tags match.
+  - **Count-based (metric) and time-slice SLOs** have no monitors, so they are related by tags: an
+    SLO is related when it carries the downtime's **group scope**. A downtime on monitor tags
+    `env:prod` with scope `project:gen2` relates every such SLO tagged `project:gen2`, whether or
+    not it's tagged `env:prod`. `OR` scopes relate SLOs carrying either side, and excluded terms
+    (`-project:x`, `NOT project:x`) are never required. When the scope is `*` (or only exclusions),
+    the downtime's monitor tags are used instead. A downtime on a monitor ID relates them through
+    its group scope too, as long as the scope names more than an environment (`env:dev` alone
+    relates nothing); without a scope it relates none.
   - **Strict SLO matching** (toggle in the SLO corrections view, or `?slomatch=strict` in the URL)
-    restores the narrower rule: the SLO must carry every monitor tag and every scope term.
+    restores the narrower rule for count-based and time-slice SLOs: the SLO must carry every
+    monitor tag and every scope term.
 - **SLO corrections:** a view listing the active, scheduled and recurring corrections on those SLOs
   (including corrections that target SLOs by tag query), with how long they run and how long is
   left. One-time corrections can be **extended** (start kept, end moved) or **canceled**. Canceling

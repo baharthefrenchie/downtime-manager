@@ -13,6 +13,7 @@ import {
     LINK_START_TOLERANCE_MS,
     linkedCorrections,
     linkedExtendBlockedReason,
+    queryMatchesMonitorTags,
     relatedSlos,
     type SloCorrectionSummary,
     type SloSummary,
@@ -136,9 +137,36 @@ describe('relatedSlos', () => {
         assert.deepEqual(relatedSlos(row, customerSlos).map((r) => r.slo.id), ['both', 'other', 'scope-only']);
     });
 
-    it('only relates monitor-based SLOs for direct downtimes', () => {
+    it('relates count-based SLOs to a monitor-ID downtime by its group scope', () => {
         const [row] = rowsFor([monitor(2, ['project:gen2'])], [downtime('d', { monitorId: 2, scope: 'project:gen2' })]);
-        assert.deepEqual(relatedSlos(row, [...customerSlos, slo('uses-2', { monitorIds: [2] })]).map((r) => r.slo.id), ['uses-2']);
+        assert.deepEqual(relatedSlos(row, [...customerSlos, slo('uses-2', { monitorIds: [2] })]).map((r) => r.slo.id), [
+            'both',
+            'scope-only',
+            'uses-2',
+        ]);
+        // An environment alone doesn't say which service is affected.
+        const envOnlySlo = slo('env-dev', { type: 'metric', tags: ['env:dev', 'service:a'] });
+        const [envOnly] = rowsFor([monitor(4, ['env:dev'])], [downtime('d', { monitorId: 4, scope: 'env:dev' })]);
+        assert.deepEqual(relatedSlos(envOnly, [envOnlySlo]), []);
+        const [envAndService] = rowsFor([monitor(5, ['env:dev'])], [downtime('d', { monitorId: 5, scope: 'env:dev service:a' })]);
+        assert.deepEqual(relatedSlos(envAndService, [envOnlySlo]).map((r) => r.slo.id), ['env-dev']);
+        // A whole-monitor downtime on a monitor ID carries no tags: only SLOs built on the monitor.
+        const [whole] = rowsFor([monitor(3, ['project:gen2'])], [downtime('d', { monitorId: 3 })]);
+        assert.deepEqual(relatedSlos(whole, [...customerSlos, slo('uses-3', { monitorIds: [3] })]).map((r) => r.slo.id), ['uses-3']);
+    });
+
+    it('relates monitor-based SLOs only through their own monitors, whatever their tags', () => {
+        // The SLO carries the scope and tags but is built on other monitors, so muting monitor 1 doesn't affect it.
+        const otherMonitors = slo('other-monitors', { monitorIds: [8, 9], tags: ['project:gen2', 'env:prod'] });
+        assert.deepEqual(relatedSlos(gen2(), [otherMonitors]), []);
+        assert.deepEqual(relatedSlos(gen2(), [otherMonitors], 'strict'), []);
+        const uses1 = slo('uses-1', { monitorIds: [1], tags: ['team:other'] });
+        assert.deepEqual(relatedSlos(gen2(), [uses1]).map((r) => [r.slo.id, r.relation]), [['uses-1', 'Monitor-based SLO']]);
+    });
+
+    it('relates time-slice SLOs by tags like count-based ones', () => {
+        const timeSlice = slo('ts', { type: 'time_slice', tags: ['project:gen2'] });
+        assert.deepEqual(relatedSlos(gen2(), [timeSlice]).map((r) => [r.slo.id, r.relation]), [['ts', 'Shares downtime scope']]);
     });
 });
 
@@ -196,8 +224,9 @@ describe('corrections linked to a downtime', () => {
     const downtimeStartS = nowS - HOUR;
     const gen2Slo = slo('gen2', { type: 'metric', tags: ['project:gen2'] });
     const otherSlo = slo('other', { type: 'metric', tags: ['project:gen3'] });
+    const at = (startMs: number | null, monitorTags: string[] = []) => ({ startMs, monitorTags });
     const linkedIds = (corrections: SloCorrectionSummary[], slos = [gen2Slo]) =>
-        linkedCorrections(downtimeStartS * 1000, slos, corrections, NOW).linked.map((l) => l.view.correction.id);
+        linkedCorrections(at(downtimeStartS * 1000), slos, slos, corrections, NOW).linked.map((l) => l.view.correction.id);
 
     it('links one-time corrections starting within 5 minutes of the downtime', () => {
         assert.equal(LINK_START_TOLERANCE_MS, 5 * 60_000);
@@ -226,7 +255,7 @@ describe('corrections linked to a downtime', () => {
 
     it('never links recurring corrections, but reports them', () => {
         const recurring = correction('weekly', { sloId: 'gen2', start: downtimeStartS, end: null, duration: HOUR, rrule: 'FREQ=WEEKLY' });
-        const result = linkedCorrections(downtimeStartS * 1000, [gen2Slo], [recurring], NOW);
+        const result = linkedCorrections(at(downtimeStartS * 1000), [gen2Slo], [gen2Slo], [recurring], NOW);
         assert.deepEqual(result.linked, []);
         assert.deepEqual(result.recurring.map((r) => r.view.correction.id), ['weekly']);
     });
@@ -235,7 +264,7 @@ describe('corrections linked to a downtime', () => {
         assert.deepEqual(linkedIds([correction('ended', { sloId: 'gen2', start: downtimeStartS, end: nowS - 60 })]), []);
         assert.deepEqual(linkedIds([correction('c', { sloId: 'gen2', start: downtimeStartS })], [otherSlo]), []);
         assert.deepEqual(linkedIds([correction('c', { sloId: 'gen2', start: downtimeStartS })], []), []);
-        assert.deepEqual(linkedCorrections(null, [gen2Slo], [correction('c', { sloId: 'gen2' })], NOW).linked, []);
+        assert.deepEqual(linkedCorrections(at(null), [gen2Slo], [gen2Slo], [correction('c', { sloId: 'gen2' })], NOW).linked, []);
     });
 
     it('uses the SLOs related through that downtime only', () => {
@@ -252,5 +281,41 @@ describe('corrections linked to a downtime', () => {
         const view = correctionView(correction('c', { start: downtimeStartS, end: nowS + 2 * HOUR }), NOW);
         assert.equal(linkedExtendBlockedReason(view, NOW + 3 * HOUR * 1000), null);
         assert.match(linkedExtendBlockedReason(view, NOW + HOUR * 1000) ?? '', /Already ends/);
+    });
+});
+
+describe('corrections created from a downtime in Datadog', () => {
+    const startS = nowS - HOUR;
+    const tags = ['env:prod', 'service:web-store'];
+    const countSlo = slo('count', { type: 'metric', tags: ['env:prod', 'service:web-store', 'team:shop'] });
+    const fromDowntime = (overrides: Partial<SloCorrectionSummary> = {}) =>
+        correction('dd', { sloId: null, sloQuery: 'service:web-store env:prod', start: startS, ...overrides });
+    const link = (correctionList: SloCorrectionSummary[], related: SloSummary[] = []) =>
+        linkedCorrections({ startMs: startS * 1000, monitorTags: tags }, related, [countSlo], correctionList, NOW).linked;
+
+    it('matches a query equal to the monitor tags, in any order and case', () => {
+        assert.equal(queryMatchesMonitorTags('service:web-store env:prod', tags), true);
+        assert.equal(queryMatchesMonitorTags('ENV:prod AND service:web-store', tags), true);
+        assert.equal(queryMatchesMonitorTags('env:prod', tags), false);
+        assert.equal(queryMatchesMonitorTags('env:prod OR service:web-store', tags), false);
+        assert.equal(queryMatchesMonitorTags('env:prod service:web-store -team:x', tags), false);
+        assert.equal(queryMatchesMonitorTags('env:prod', ['*']), false);
+    });
+
+    it('links it even when the scope relates none of its SLOs, and lists the SLOs it matches', () => {
+        const [item] = link([fromDowntime()]);
+        assert.equal(item.reason, 'from-downtime');
+        assert.deepEqual(item.slos.map((s) => s.id), ['count']);
+    });
+
+    it('still requires a matching start, and ignores other queries and single-SLO corrections', () => {
+        assert.deepEqual(link([fromDowntime({ start: startS + 10 * 60 })]), []);
+        assert.deepEqual(link([fromDowntime({ sloQuery: 'service:checkout env:prod' })]), []);
+        assert.deepEqual(link([correction('by-id', { sloId: 'count', start: startS })]), []);
+    });
+
+    it('prefers the related-SLO reason when the correction also targets a related SLO', () => {
+        const [item] = link([fromDowntime()], [countSlo]);
+        assert.equal(item.reason, 'related-slo');
     });
 });

@@ -8,7 +8,7 @@ import { StatusPill } from '@datadog/druids/pills/StatusPill';
 import { Table, type TableColumn } from '@datadog/druids/table/Table';
 import { Text } from '@datadog/druids/typography/Text';
 
-import { correctionStateLevel, correctionTiming, formatEnd, formatStart, sloUrl } from './format';
+import { correctionStateLevel, correctionTiming, formatEnd, formatStart, sloTypeLabel, sloUrl } from './format';
 import type { Density } from './hooks';
 import { correctionCancelBlockedReason, correctionExtendBlockedReason } from './slo';
 import type { CorrectionRow } from './useSloData';
@@ -55,7 +55,7 @@ export function SloCorrectionsView({ rows, nowMs, density, isLoading, errorMessa
                                 label={first?.name ?? 'SLO'}
                             />
                             <Text size="xs" variant="tertiary" hasEllipsis title={query ?? undefined}>
-                                {query ? `All SLOs matching ${query}` : first?.type ? `${first.type} SLO` : ''}
+                                {query ? `All SLOs matching ${query}` : first?.type ? `${sloTypeLabel(first.type)} SLO` : ''}
                                 {others.length > 0 ? ` · +${others.length} more related` : ''}
                             </Text>
                         </div>

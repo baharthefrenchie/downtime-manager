@@ -32,6 +32,7 @@ import {
     monitorStateLevel,
     monitorUrl,
     mutedScopeLabel,
+    sloTypeLabel,
     sloUrl,
     windowDetail,
     windowLevel,
@@ -127,7 +128,8 @@ function RelatedSlosSection({
     if (relatedSlos.length === 0) {
         return (
             <Text variant="tertiary">
-                No SLO uses this monitor or shares the tags of the downtime that covers it.
+                No monitor-based SLO uses this monitor, and no count-based or time-slice SLO carries the scope or tags
+                of the downtime that covers it.
             </Text>
         );
     }
@@ -144,7 +146,7 @@ function RelatedSlosSection({
                             </StatusPill>
                         </div>
                         <Text as="div" size="xs" variant="tertiary">
-                            {slo.type} SLO · SLI {formatPercent(slo.sli)}
+                            {sloTypeLabel(slo.type)} SLO · SLI {formatPercent(slo.sli)}
                             {slo.target !== null ? ` (target ${slo.target}%)` : ''} · error budget{' '}
                             {formatPercent(slo.errorBudgetRemaining, 1)}
                             {slo.timeframe ? ` · ${slo.timeframe}` : ''}

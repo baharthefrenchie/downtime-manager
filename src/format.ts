@@ -362,6 +362,14 @@ export function friendlyError(
     return message;
 }
 
+/** Human name for an SLO type from the API (`monitor`, `metric`, `time_slice`). */
+export function sloTypeLabel(type: string): string {
+    if (type === 'monitor') return 'Monitor-based';
+    if (type === 'metric') return 'Count-based';
+    if (type === 'time_slice') return 'Time-slice';
+    return type;
+}
+
 /** Link to an SLO in the org the app runs in. */
 export function sloUrl(sloId: string): string {
     return `${datadogBaseUrl()}/slo/manage?slo_id=${encodeURIComponent(sloId)}`;

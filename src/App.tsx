@@ -336,7 +336,13 @@ function App() {
                 const slos = downtimeRelatedSlos(match.downtime.id, rows, sloData.context.slos, sloMatchMode);
                 return {
                     status: 'ready',
-                    corrections: linkedCorrections(match.startMs, slos, sloData.context.corrections, dataUpdatedAt),
+                    corrections: linkedCorrections(
+                        { startMs: match.startMs, monitorTags: match.downtime.monitorTags },
+                        slos,
+                        sloData.context.slos,
+                        sloData.context.corrections,
+                        dataUpdatedAt,
+                    ),
                 };
             }
             if (sloData.error) {

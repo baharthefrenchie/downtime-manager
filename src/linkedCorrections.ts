@@ -35,6 +35,12 @@ export function selectedCorrectionIds(
 
 export function linkedCorrectionLabel(item: LinkedCorrection): string {
     const names = item.slos.map((slo) => slo.name);
-    const sloPart = names.length > 2 ? `${names.slice(0, 2).join(', ')} +${names.length - 2} more` : names.join(', ');
+    const query = item.view.correction.sloQuery;
+    const sloPart =
+        names.length === 0
+            ? `SLOs matching ${query ?? 'its query'}`
+            : names.length > 2
+              ? `${names.slice(0, 2).join(', ')} +${names.length - 2} more`
+              : names.join(', ');
     return `${item.view.correction.category} correction on ${sloPart}`;
 }
