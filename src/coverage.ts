@@ -2,7 +2,7 @@
  * Shared types plus the pure matching logic that turns live monitors and
  * downtimes into monitor-centric coverage rows.
  */
-import { evaluateScope, parseScope, positiveTerms, tagMatches } from './scope.ts';
+import { evaluateScope, parseScope, positiveTerms, tagMatches, type ScopeExpr } from './scope.ts';
 
 export { evaluateScope, parseScope, positiveTerms, tagMatches, type ScopeExpr } from './scope.ts';
 
@@ -42,6 +42,8 @@ export interface LiveDowntime {
      * downtime list yet; the real downtimes load when its details are opened.
      */
     isPlaceholder?: boolean;
+    /** A placeholder shown while the downtime list is still loading. */
+    isLoading?: boolean;
 }
 
 /** One downtime Datadog itself applies to a monitor (from its downtime-matching API). */
@@ -66,6 +68,8 @@ export interface LiveSnapshot {
     /** Monitors Datadog reports as muted (`muted:true`): the source of truth for "in maintenance". */
     datadogMutedIds?: number[];
     fetchedAt: string;
+    /** The fast first look: muted monitors only, their downtimes still loading. */
+    isPreview?: boolean;
 }
 
 /** How a downtime reaches a monitor. */
@@ -169,12 +173,6 @@ function isAllGroupsScope(scope: string | null): boolean {
     return positiveScopeTerms(scope).length === 0;
 }
 
-/** True when the monitor's own tags satisfy the scope, so every group of the monitor is in scope. */
-function scopeSatisfiedByMonitorTags(scope: string | null, monitorTags: string[]): boolean {
-    const expr = parseScope(scope);
-    return positiveTerms(expr).length > 0 && evaluateScope(expr, monitorTags);
-}
-
 export function userLabel(user: UserSummary | undefined, fallbackId: string | null): string {
     if (user) {
         if (user.name && user.handle && user.name !== user.handle) {
@@ -189,12 +187,31 @@ export function monitorOwner(monitor: LiveMonitor): string {
     return monitor.creatorName || monitor.creatorHandle || monitor.creatorEmail || 'Unknown owner';
 }
 
+/** A downtime with its scope parsed once, for matching against every monitor. */
+interface PreparedDowntime {
+    downtime: LiveDowntime;
+    expr: ScopeExpr;
+    allGroups: boolean;
+    wildcardTags: boolean;
+}
+
+function prepareDowntime(downtime: LiveDowntime): PreparedDowntime {
+    const expr = parseScope(downtime.scope);
+    return {
+        downtime,
+        expr,
+        allGroups: positiveTerms(expr).length === 0,
+        wildcardTags: isWildcardOnly(downtime.monitorTags),
+    };
+}
+
 function matchDowntime(
     monitor: LiveMonitor,
-    downtime: LiveDowntime,
+    prepared: PreparedDowntime,
 ): Pick<DowntimeMatch, 'kind' | 'coversAllGroups' | 'reason'> | null {
-    const allGroups = isAllGroupsScope(downtime.scope);
-    const scopeOnTags = scopeSatisfiedByMonitorTags(downtime.scope, monitor.tags);
+    const { downtime, allGroups } = prepared;
+    // The monitor's own tags satisfy the scope, so every group of the monitor is in scope.
+    const scopeOnTags = () => !allGroups && evaluateScope(prepared.expr, monitor.tags);
 
     // 1. Direct: monitor_identifier.monitor_id
     if (downtime.monitorId !== null) {
@@ -203,20 +220,20 @@ function matchDowntime(
         }
         return {
             kind: 'direct',
-            coversAllGroups: allGroups || scopeOnTags,
+            coversAllGroups: allGroups || scopeOnTags(),
             reason: `monitor_identifier.monitor_id = ${monitor.id}`,
         };
     }
 
     // 2. Tag-based: every downtime monitor tag must be present on the monitor.
-    if (!isWildcardOnly(downtime.monitorTags)) {
+    if (!prepared.wildcardTags) {
         const allTagsMatch = downtime.monitorTags.every((tag) => tagMatches(tag, monitor.tags));
         if (!allTagsMatch) {
             return null;
         }
         return {
             kind: 'tag',
-            coversAllGroups: allGroups || scopeOnTags,
+            coversAllGroups: allGroups || scopeOnTags(),
             reason: `monitor tags [${downtime.monitorTags.join(', ')}] all present on monitor`,
         };
     }
@@ -229,7 +246,7 @@ function matchDowntime(
             reason: 'monitor tags `*` with scope `*` (org-wide downtime)',
         };
     }
-    if (scopeOnTags) {
+    if (scopeOnTags()) {
         return {
             kind: 'scope',
             coversAllGroups: true,
@@ -267,7 +284,7 @@ function downtimeFromDatadogMatch(match: DatadogDowntimeMatch): LiveDowntime {
     };
 }
 
-function placeholderDowntime(monitorId: number): LiveDowntime {
+function placeholderDowntime(monitorId: number, isLoading: boolean): LiveDowntime {
     return {
         id: `datadog-muted-${monitorId}`,
         status: 'active',
@@ -284,6 +301,7 @@ function placeholderDowntime(monitorId: number): LiveDowntime {
         url: null,
         fromDatadogMatch: true,
         isPlaceholder: true,
+        isLoading,
     };
 }
 
@@ -313,18 +331,19 @@ export function buildCoverageRows(
      * fetched for muted monitors the downtime list can't explain.
      */
     verified?: Record<string, DatadogDowntimeMatch[]>,
-    /** Creator ids whose names are still being looked up. */
-    resolvingIds?: Set<string>,
+    /** Creator ids Datadog says don't exist (deleted users); every other unknown id is still resolving. */
+    unknownIds?: Set<string>,
 ): CoverageRow[] {
     const activeDowntimes = snapshot.downtimes.filter((downtime) => isActiveDowntime(downtime, nowMs));
     const rows: CoverageRow[] = [];
 
     const creatorLabelOf = (downtime: LiveDowntime) => {
+        if (downtime.isLoading) return 'Loading…';
         if (downtime.fromDatadogMatch) return 'Not in downtime list';
-        if (!users || (downtime.createdById && !users[downtime.createdById] && resolvingIds?.has(downtime.createdById))) {
-            return 'Resolving…';
-        }
-        return userLabel(downtime.createdById ? users[downtime.createdById] : undefined, downtime.createdById);
+        const id = downtime.createdById;
+        if (!id) return 'Unknown';
+        if (users?.[id]) return userLabel(users[id], id);
+        return unknownIds?.has(id) ? 'Unknown user' : 'Resolving…';
     };
     const toMatch = (downtime: LiveDowntime, match: Pick<DowntimeMatch, 'kind' | 'coversAllGroups' | 'reason'>) => ({
         ...match,
@@ -336,11 +355,29 @@ export function buildCoverageRows(
 
     const datadogMuted = snapshot.datadogMutedIds ? new Set(snapshot.datadogMutedIds) : null;
 
+    // Direct downtimes only ever match their own monitor, so index them by monitor id;
+    // tag and scope downtimes are checked against every monitor. Order is kept, so
+    // matches come out exactly as a full scan would produce them.
+    const byMonitorId = new Map<number, { index: number; prepared: PreparedDowntime }[]>();
+    const indirect: { index: number; prepared: PreparedDowntime }[] = [];
+    activeDowntimes.forEach((downtime, index) => {
+        const entry = { index, prepared: prepareDowntime(downtime) };
+        if (downtime.monitorId !== null) {
+            const list = byMonitorId.get(downtime.monitorId) ?? [];
+            list.push(entry);
+            byMonitorId.set(downtime.monitorId, list);
+        } else {
+            indirect.push(entry);
+        }
+    });
+
     for (const monitor of snapshot.monitors) {
         const matches: DowntimeMatch[] = [];
-        for (const downtime of activeDowntimes) {
-            const match = matchDowntime(monitor, downtime);
-            if (match) matches.push(toMatch(downtime, match));
+        const direct = byMonitorId.get(monitor.id) ?? [];
+        const candidates = direct.length === 0 ? indirect : [...direct, ...indirect].sort((a, b) => a.index - b.index);
+        for (const { prepared } of candidates) {
+            const match = matchDowntime(monitor, prepared);
+            if (match) matches.push(toMatch(prepared.downtime, match));
         }
         // Downtimes Datadog applies that the downtime list doesn't include (e.g. host auto-mutes).
         const datadogMatches = verified?.[String(monitor.id)];
@@ -361,10 +398,12 @@ export function buildCoverageRows(
         // (e.g. a host auto-mute): show it now, load the real downtimes on demand.
         if (matches.length === 0 && datadogMuted?.has(monitor.id)) {
             matches.push(
-                toMatch(placeholderDowntime(monitor.id), {
+                toMatch(placeholderDowntime(monitor.id, Boolean(snapshot.isPreview)), {
                     kind: 'scope',
                     coversAllGroups: false,
-                    reason: 'Muted by a downtime outside the downtime list, such as a host auto-mute',
+                    reason: snapshot.isPreview
+                        ? 'Downtimes are still loading'
+                        : 'Muted by a downtime outside the downtime list, such as a host auto-mute',
                 }),
             );
         }

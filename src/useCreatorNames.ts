@@ -7,6 +7,8 @@ import { resolveUsers } from './maintenance.backend';
 const NAMES_MAX_AGE_MS = 7 * 24 * 60 * 60_000;
 const UNKNOWN_MAX_AGE_MS = 24 * 60 * 60_000;
 const BATCH_SIZE = 25;
+// The first batch is small, so the names people look at first (the open monitor, the top rows) arrive quickly.
+const FIRST_BATCH_SIZE = 6;
 // Datadog's users API allows few calls per minute; spacing batches avoids 429 bursts.
 const PAUSE_BETWEEN_BATCHES_MS = 4000;
 // Lookups that were rate-limited (neither found nor unknown) are retried this many times.
@@ -54,20 +56,13 @@ export function useCreatorNames(userIds: string[]) {
                     await new Promise((resolve) => setTimeout(resolve, PAUSE_BETWEEN_BATCHES_MS));
                     if (cancelled) return;
                 }
+                const batch = queue.splice(0, isFirstBatch ? FIRST_BATCH_SIZE : BATCH_SIZE);
                 isFirstBatch = false;
-                const batch = queue.splice(0, BATCH_SIZE);
                 let done = batch;
                 try {
                     const { found, notFound } = await resolveUsers(batch);
-                    if (cancelled) return;
-                    // Neither found nor unknown means the lookup was rate-limited: retry it later.
-                    const retry = batch.filter((id) => !found[id] && !notFound.includes(id));
-                    retry.forEach((id) => {
-                        const tries = (attempts.get(id) ?? 0) + 1;
-                        attempts.set(id, tries);
-                        if (tries < MAX_ATTEMPTS) queue.push(id);
-                    });
-                    done = batch.filter((id) => !queue.includes(id));
+                    // Keep what came back even if the queue was restarted (for example, to look up
+                    // the monitor that was just opened first): those names are still right.
                     setUsers((previous) => {
                         const next = { ...previous, ...found };
                         writeCache('user-names', next);
@@ -81,6 +76,15 @@ export function useCreatorNames(userIds: string[]) {
                             return next;
                         });
                     }
+                    if (cancelled) return;
+                    // Neither found nor unknown means the lookup was rate-limited: retry it later.
+                    const retry = batch.filter((id) => !found[id] && !notFound.includes(id));
+                    retry.forEach((id) => {
+                        const tries = (attempts.get(id) ?? 0) + 1;
+                        attempts.set(id, tries);
+                        if (tries < MAX_ATTEMPTS) queue.push(id);
+                    });
+                    done = batch.filter((id) => !queue.includes(id));
                 } catch {
                     // A failed batch leaves its ids unresolved; the next refresh retries them.
                 }
@@ -97,5 +101,6 @@ export function useCreatorNames(userIds: string[]) {
         };
     }, [idsKey]);
 
-    return { users, resolvingIds: inFlight };
+    const unknownIds = useMemo(() => new Set(Object.keys(unknown)), [unknown]);
+    return { users, resolvingIds: inFlight, unknownIds };
 }

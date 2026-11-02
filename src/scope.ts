@@ -130,15 +130,33 @@ export function parseScope(scope: string | null | undefined): ScopeExpr {
     return parts.length === 0 ? { type: 'all' } : simplify('and', parts);
 }
 
-function globToRegExp(pattern: string): RegExp {
-    const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
-    return new RegExp(`^${escaped}$`, 'i');
+// Matching runs for every monitor × downtime pair, so each pattern is compiled once.
+const PATTERN_CACHE_LIMIT = 5000;
+const patternCache = new Map<string, RegExp | string>();
+
+/** A case-insensitive matcher for a tag pattern: a plain string when it has no wildcard. */
+function compilePattern(pattern: string): RegExp | string {
+    let compiled = patternCache.get(pattern);
+    if (compiled === undefined) {
+        const clean = pattern.trim().replace(/"/g, '');
+        if (/[*?]/.test(clean)) {
+            const escaped = clean.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
+            compiled = new RegExp(`^${escaped}$`, 'i');
+        } else {
+            compiled = clean.toLowerCase();
+        }
+        if (patternCache.size >= PATTERN_CACHE_LIMIT) patternCache.clear();
+        patternCache.set(pattern, compiled);
+    }
+    return compiled;
 }
 
 /** Whether any tag matches a `key:value` pattern (with `*`/`?` wildcards, case-insensitive). */
 export function tagMatches(pattern: string, tags: string[]): boolean {
-    const regex = globToRegExp(pattern.trim().replace(/"/g, ''));
-    return tags.some((tag) => regex.test(tag.trim()));
+    const compiled = compilePattern(pattern);
+    return typeof compiled === 'string'
+        ? tags.some((tag) => tag.trim().toLowerCase() === compiled)
+        : tags.some((tag) => compiled.test(tag.trim()));
 }
 
 export interface EvaluateOptions {
