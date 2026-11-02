@@ -4,10 +4,11 @@
  */
 import {
     correctionCancelBlockedReason,
+    LINK_TOLERANCE_MS,
     linkedExtendBlockedReason,
     type DowntimeCorrections,
     type LinkedCorrection,
-} from './slo';
+} from './slo.ts';
 
 /** The SLO corrections linked to a downtime, or why they aren't known. */
 export type LinkedCorrectionsState =
@@ -20,18 +21,26 @@ export function linkedBlockedReason(item: LinkedCorrection, mode: 'extend' | 'ca
     return mode === 'extend' ? linkedExtendBlockedReason(item.view, newEndMs) : correctionCancelBlockedReason(item.view);
 }
 
+/** Corrections in the same window as the downtime are ticked until the user unticks them; overlapping ones aren't. */
+export function isTicked(item: LinkedCorrection, toggled: Set<string>): boolean {
+    return (item.fit === 'same-window') !== toggled.has(item.view.correction.id);
+}
+
 /** Ids of the ticked corrections that can change with the downtime. */
 export function selectedCorrectionIds(
     state: LinkedCorrectionsState,
-    unticked: Set<string>,
+    toggled: Set<string>,
     mode: 'extend' | 'cancel',
     newEndMs: number,
 ): string[] {
     if (state.status !== 'ready') return [];
     return state.corrections.linked
-        .filter((item) => !unticked.has(item.view.correction.id) && !linkedBlockedReason(item, mode, newEndMs))
+        .filter((item) => isTicked(item, toggled) && !linkedBlockedReason(item, mode, newEndMs))
         .map((item) => item.view.correction.id);
 }
+
+/** Minutes in the same-window tolerance, for UI copy. */
+export const LINK_TOLERANCE_MINUTES = LINK_TOLERANCE_MS / 60_000;
 
 export function linkedCorrectionLabel(item: LinkedCorrection): string {
     const names = item.slos.map((slo) => slo.name);

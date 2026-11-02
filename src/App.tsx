@@ -328,7 +328,7 @@ function App() {
     const [correctionCancelTarget, setCorrectionCancelTarget] = useState<CorrectionTarget | null>(null);
     const refreshSlos = () => queryClient.invalidateQueries({ queryKey: SLO_QUERY_KEY });
 
-    // SLO corrections that change together with a downtime (one-time, starting with it, on its related SLOs).
+    // SLO corrections that change together with a downtime (one-time, overlapping it, on its related SLOs).
     const sloMatchMode = filters.strictSloMatch ? 'strict' : 'scope';
     const linkedFor = useCallback(
         (match: DowntimeMatch): LinkedCorrectionsState => {
@@ -337,7 +337,7 @@ function App() {
                 return {
                     status: 'ready',
                     corrections: linkedCorrections(
-                        { startMs: match.startMs, monitorTags: match.downtime.monitorTags },
+                        { startMs: match.startMs, endMs: match.endMs, monitorTags: match.downtime.monitorTags },
                         slos,
                         sloData.context.slos,
                         sloData.context.corrections,
