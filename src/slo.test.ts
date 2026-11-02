@@ -84,18 +84,57 @@ describe('relatedSlos', () => {
         assert.deepEqual(related.map((r) => [r.slo.id, r.relation]), [['a', 'Monitor-based SLO']]);
     });
 
-    it('relates SLOs by tags only when coverage is tag/scope-based, requiring every downtime term', () => {
-        const slos = [
-            slo('both', { type: 'metric', tags: ['service:api', 'env:prod'] }),
-            slo('one', { type: 'metric', tags: ['service:api'] }),
-        ];
-        const [tagRow] = rowsFor([monitor(1, ['service:api', 'env:prod'])], [downtime('t', { monitorTags: ['service:api'], scope: 'env:prod' })]);
-        assert.deepEqual(relatedSlos(tagRow, slos).map((r) => [r.slo.id, r.relation, r.matchedTags]), [
-            ['both', 'Shares downtime tags', ['service:api', 'env:prod']],
-        ]);
+    // The customer's pattern: By Monitor Tags downtime [env:prod] with group scope project:gen2.
+    const gen2 = () => rowsFor([monitor(1, ['env:prod', 'project:gen2'])], [downtime('t', { monitorTags: ['env:prod'], scope: 'project:gen2' })])[0];
+    const customerSlos = [
+        slo('scope-only', { type: 'metric', tags: ['project:gen2', 'team:sre'] }),
+        slo('both', { type: 'metric', tags: ['project:gen2', 'env:prod'] }),
+        slo('tags-only', { type: 'metric', tags: ['env:prod'] }),
+        slo('other', { type: 'metric', tags: ['project:gen3', 'env:prod'] }),
+    ];
 
-        const [directRow] = rowsFor([monitor(2, ['service:api', 'env:prod'])], [downtime('d', { monitorId: 2, scope: 'env:prod' })]);
-        assert.deepEqual(relatedSlos(directRow, slos), []);
+    it('relates SLOs that carry the group scope, without requiring the monitor tags (default)', () => {
+        assert.deepEqual(relatedSlos(gen2(), customerSlos).map((r) => [r.slo.id, r.relation, r.matchedTags]), [
+            ['both', 'Shares downtime scope', ['project:gen2']],
+            ['scope-only', 'Shares downtime scope', ['project:gen2']],
+        ]);
+    });
+
+    it('strict mode requires every monitor tag and every scope term', () => {
+        assert.deepEqual(relatedSlos(gen2(), customerSlos, 'strict').map((r) => [r.slo.id, r.relation, r.matchedTags]), [
+            ['both', 'Shares downtime tags', ['env:prod', 'project:gen2']],
+        ]);
+    });
+
+    it('falls back to the monitor tags when the scope is * or empty', () => {
+        for (const scope of ['*', '', null]) {
+            const [row] = rowsFor([monitor(1, ['env:prod'])], [downtime('t', { monitorTags: ['env:prod'], scope })]);
+            assert.deepEqual(relatedSlos(row, customerSlos).map((r) => [r.slo.id, r.relation]), [
+                ['both', 'Shares downtime tags'],
+                ['other', 'Shares downtime tags'],
+                ['tags-only', 'Shares downtime tags'],
+            ], String(scope));
+        }
+    });
+
+    it('never requires a negated scope term', () => {
+        for (const scope of ['project:gen2 -project:x', 'project:gen2 AND NOT project:x']) {
+            const [row] = rowsFor([monitor(1, ['env:prod', 'project:gen2'])], [downtime('t', { monitorTags: ['env:prod'], scope })]);
+            assert.deepEqual(relatedSlos(row, customerSlos).map((r) => [r.slo.id, r.matchedTags]), [
+                ['both', ['project:gen2']],
+                ['scope-only', ['project:gen2']],
+            ], scope);
+        }
+    });
+
+    it('relates an SLO carrying either side of an OR scope', () => {
+        const [row] = rowsFor([monitor(1, ['project:gen3'])], [downtime('t', { monitorTags: ['*'], scope: 'project:gen2 OR project:gen3' })]);
+        assert.deepEqual(relatedSlos(row, customerSlos).map((r) => r.slo.id), ['both', 'other', 'scope-only']);
+    });
+
+    it('only relates monitor-based SLOs for direct downtimes', () => {
+        const [row] = rowsFor([monitor(2, ['project:gen2'])], [downtime('d', { monitorId: 2, scope: 'project:gen2' })]);
+        assert.deepEqual(relatedSlos(row, [...customerSlos, slo('uses-2', { monitorIds: [2] })]).map((r) => r.slo.id), ['uses-2']);
     });
 });
 

@@ -181,7 +181,7 @@ function App() {
     );
 
     // SLOs related to these monitors and their corrections (loaded in parallel, cached).
-    const sloData = useSloData(rows, dataUpdatedAt);
+    const sloData = useSloData(rows, dataUpdatedAt, filters.strictSloMatch ? 'strict' : 'scope');
     const { relatedByMonitor, correctionsBySlo } = sloData;
 
     // ---- Filters (mirrored into the URL for shareable links) ----
@@ -921,6 +921,14 @@ function App() {
                             value={filters.view}
                             onChange={(value) => setFilters({ view: value as 'monitors' | 'corrections' })}
                         />
+                        {filters.view === 'corrections' && (
+                            <Checkbox
+                                label={isNarrow ? 'Strict matching' : 'Strict SLO matching'}
+                                isChecked={filters.strictSloMatch}
+                                onChange={(event) => setFilters({ strictSloMatch: event.target.checked })}
+                                title="Off: an SLO is related when it carries the downtime's group scope (for example project:gen2). On: it must carry every monitor tag and every scope term of the downtime."
+                            />
+                        )}
                         {!isNarrow && filters.view === 'monitors' && (
                             <Text size="sm" variant="secondary">
                                 {filteredRows.length} of {rows.length} monitors

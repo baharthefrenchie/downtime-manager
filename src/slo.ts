@@ -3,7 +3,7 @@
  * time windows) that apply to them. Pure logic; Datadog calls live in
  * slo.backend.ts.
  */
-import { positiveScopeTerms, tagMatches, toValidMs, type CoverageRow } from './coverage.ts';
+import { evaluateScope, parseScope, positiveTerms, tagMatches, toValidMs, type CoverageRow } from './coverage.ts';
 
 export interface SloSummary {
     id: string;
@@ -44,7 +44,16 @@ export interface SloContext {
     fetchedAt: string;
 }
 
-export type SloRelation = 'Monitor-based SLO' | 'Shares downtime tags';
+export type SloRelation = 'Monitor-based SLO' | 'Shares downtime scope' | 'Shares downtime tags';
+
+/**
+ * How tag/scope-based downtimes relate to SLOs:
+ * - `scope` (default): an SLO carrying the downtime's group scope (its positive
+ *   terms) is related; monitor tags aren't required. When the scope is `*` or
+ *   only exclusions, the downtime's monitor tags are used instead.
+ * - `strict`: the SLO must carry every monitor tag and satisfy the scope.
+ */
+export type SloMatchMode = 'scope' | 'strict';
 
 export interface RelatedSlo {
     slo: SloSummary;
@@ -64,18 +73,43 @@ export interface CorrectionView {
     durationMs: number | null;
 }
 
-/** Terms a downtime targets: its monitor tags (unless `*`) plus the positive terms of its scope. */
-function downtimeTerms(monitorTags: string[], scope: string | null): string[] {
-    return [...monitorTags.filter((tag) => tag.trim() && tag.trim() !== '*'), ...positiveScopeTerms(scope)];
+function concreteTags(monitorTags: string[]): string[] {
+    return monitorTags.map((tag) => tag.trim()).filter((tag) => tag && tag !== '*');
+}
+
+/**
+ * Whether a tag/scope-based downtime relates to an SLO, and through which
+ * tags. Negated scope terms are never required.
+ */
+function downtimeRelation(
+    monitorTags: string[],
+    scope: string | null,
+    sloTags: string[],
+    mode: SloMatchMode,
+): Pick<RelatedSlo, 'relation' | 'matchedTags'> | null {
+    const expr = parseScope(scope);
+    const scopeTerms = positiveTerms(expr);
+    const tags = concreteTags(monitorTags);
+    const scopeOk = scopeTerms.length === 0 || evaluateScope(expr, sloTags, { ignoreNegations: true });
+    const matchedScope = scopeTerms.filter((term) => tagMatches(term, sloTags));
+
+    if (mode === 'scope' && scopeTerms.length > 0) {
+        return scopeOk ? { relation: 'Shares downtime scope', matchedTags: matchedScope } : null;
+    }
+    // Strict mode, or a `*` scope: every monitor tag (and the scope, if any).
+    if (tags.length === 0 && scopeTerms.length === 0) return null;
+    if (!scopeOk || !tags.every((tag) => tagMatches(tag, sloTags))) return null;
+    return { relation: 'Shares downtime tags', matchedTags: [...tags, ...matchedScope] };
 }
 
 /**
  * SLOs related to a monitor in maintenance:
  * - monitor-based SLOs that use the monitor (any coverage source);
- * - for tag/scope coverage, SLOs carrying every tag/scope term of one of the downtimes
- *   that covers the monitor (the same AND semantics as downtime matching).
+ * - for tag/scope coverage, SLOs matching one of the downtimes that covers the
+ *   monitor, by its group scope (default) or, in strict mode, by every monitor
+ *   tag and the scope. See {@link SloMatchMode}.
  */
-export function relatedSlos(row: CoverageRow, slos: SloSummary[]): RelatedSlo[] {
+export function relatedSlos(row: CoverageRow, slos: SloSummary[], mode: SloMatchMode = 'scope'): RelatedSlo[] {
     const related = new Map<string, RelatedSlo>();
     for (const slo of slos) {
         if (slo.monitorIds.includes(row.monitor.id)) {
@@ -85,13 +119,10 @@ export function relatedSlos(row: CoverageRow, slos: SloSummary[]): RelatedSlo[] 
     if (row.source !== 'Direct (monitor ID)') {
         for (const match of row.matches) {
             if (match.kind === 'direct' || match.downtime.isPlaceholder) continue;
-            const terms = downtimeTerms(match.downtime.monitorTags, match.downtime.scope);
-            if (terms.length === 0) continue;
             for (const slo of slos) {
                 if (related.has(slo.id) || slo.tags.length === 0) continue;
-                if (terms.every((term) => tagMatches(term, slo.tags))) {
-                    related.set(slo.id, { slo, relation: 'Shares downtime tags', matchedTags: terms });
-                }
+                const relation = downtimeRelation(match.downtime.monitorTags, match.downtime.scope, slo.tags, mode);
+                if (relation) related.set(slo.id, { slo, ...relation });
             }
         }
     }
@@ -101,8 +132,8 @@ export function relatedSlos(row: CoverageRow, slos: SloSummary[]): RelatedSlo[] 
 /** Whether a correction applies to an SLO: by id, or by a tag query the SLO's tags satisfy. */
 export function correctionAppliesTo(correction: SloCorrectionSummary, slo: SloSummary): boolean {
     if (correction.sloId) return correction.sloId === slo.id;
-    const terms = positiveScopeTerms(correction.sloQuery);
-    return terms.length > 0 && terms.every((term) => tagMatches(term, slo.tags));
+    const query = parseScope(correction.sloQuery);
+    return positiveTerms(query).length > 0 && evaluateScope(query, slo.tags);
 }
 
 export function correctionView(correction: SloCorrectionSummary, nowMs: number): CorrectionView {

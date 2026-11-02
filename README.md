@@ -27,9 +27,16 @@ active downtimes, using live data from the Datadog org it runs in.
   are suggested as you type.
 - **Filters:** maintenance state, window, owner/creator, and downtime start date. Filters live in the
   URL, so filtered views are shareable. Export the filtered rows to CSV or JSON.
-- **Related SLOs:** for each monitor in maintenance, the SLOs it affects. These are monitor-based
-  SLOs that use the monitor and, when coverage is tag/scope-based, SLOs carrying every tag and scope
-  term of the downtime. Each shows its SLI, error budget and current corrections.
+- **Related SLOs:** for each monitor in maintenance, the SLOs it affects, each with its SLI, error
+  budget and current corrections:
+  - Monitor-based SLOs that use the monitor are always related.
+  - For tag/scope-based downtimes, an SLO is related when it carries the downtime's **group scope**.
+    A downtime on monitor tags `env:prod` with scope `project:gen2` relates every SLO tagged
+    `project:gen2`, whether or not it's tagged `env:prod`. `OR` scopes relate SLOs carrying either
+    side, and excluded terms (`-project:x`, `NOT project:x`) are never required. When the scope is
+    `*` (or only exclusions), the downtime's monitor tags are used instead.
+  - **Strict SLO matching** (toggle in the SLO corrections view, or `?slomatch=strict` in the URL)
+    restores the narrower rule: the SLO must carry every monitor tag and every scope term.
 - **SLO corrections:** a view listing the active, scheduled and recurring corrections on those SLOs
   (including corrections that target SLOs by tag query), with how long they run and how long is
   left. One-time corrections can be **extended** (start kept, end moved) or **canceled**. Canceling

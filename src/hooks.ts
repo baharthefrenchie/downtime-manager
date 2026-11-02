@@ -43,6 +43,8 @@ export interface UrlFilters {
     q: string;
     /** Ignore the embedding dashboard's template variables. */
     ignoreDashboardVariables: boolean;
+    /** Relate SLOs by every monitor tag and scope term, instead of the group scope alone. */
+    strictSloMatch: boolean;
 }
 
 function readUrlFilters(): UrlFilters {
@@ -62,6 +64,7 @@ function readUrlFilters(): UrlFilters {
         view: params.get('view') === 'corrections' ? 'corrections' : 'monitors',
         q: params.get('q') ?? '',
         ignoreDashboardVariables: params.get('tv') === 'off',
+        strictSloMatch: params.get('slomatch') === 'strict',
     };
 }
 
@@ -79,6 +82,7 @@ function writeUrlFilters(filters: UrlFilters): void {
     if (filters.monitor !== null) params.set('monitor', String(filters.monitor));
     if (filters.withSlos) params.set('slos', '1');
     if (filters.view === 'corrections') params.set('view', 'corrections');
+    if (filters.strictSloMatch) params.set('slomatch', 'strict');
     const query = params.toString();
     const url = `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`;
     try {
