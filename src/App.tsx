@@ -50,6 +50,12 @@ import {
 } from './format';
 import { useDensity, useUrlFilters, type Density } from './hooks';
 import { useCreatorNames } from './useCreatorNames';
+import type { CorrectionTarget } from './DowntimeModals';
+import { cancelSloCorrection, extendSloCorrection } from './slo.backend';
+import { SearchBar } from './SearchBar';
+import { parseQuery, rowMatchesQuery } from './search';
+import { SloCorrectionsView } from './SloCorrectionsView';
+import { correctionRowsFor, SLO_QUERY_KEY, useSloData, type CorrectionRow } from './useSloData';
 import {
     cancelActiveDowntime,
     extendActiveDowntime,
@@ -63,9 +69,12 @@ const loadDateFilter = () => import('./DateFilter');
 const DetailPanel = lazy(() => loadLazyParts().then((m) => ({ default: m.DetailPanel })));
 const CancelDowntimeModal = lazy(() => loadLazyParts().then((m) => ({ default: m.CancelDowntimeModal })));
 const ExtendDowntimeModal = lazy(() => loadLazyParts().then((m) => ({ default: m.ExtendDowntimeModal })));
+const ExtendCorrectionModal = lazy(() => loadLazyParts().then((m) => ({ default: m.ExtendCorrectionModal })));
+const CancelCorrectionModal = lazy(() => loadLazyParts().then((m) => ({ default: m.CancelCorrectionModal })));
 const DateFilter = lazy(() => loadDateFilter().then((m) => ({ default: m.DateFilter })));
 
 const DEFAULT_PAGE_SIZE = 25;
+const SLO_CORRECTIONS_PERMISSION = '"SLOs Corrections" (slos_corrections)';
 const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
 
 const SNAPSHOT_QUERY_KEY = ['maintenance-snapshot'] as const;
@@ -98,8 +107,8 @@ const WINDOW_OPTIONS: Option<WindowFilter>[] = [
 
 /** Columns shown at each layout density, in display order. */
 const COLUMNS_BY_DENSITY: Record<Density, string[]> = {
-    xl: ['monitor', 'monitorState', 'maintenanceState', 'source', 'window', 'owner', 'message', 'start', 'end', 'actions'],
-    wide: ['monitor', 'monitorState', 'maintenanceState', 'source', 'window', 'owner', 'end', 'actions'],
+    xl: ['monitor', 'monitorState', 'maintenanceState', 'source', 'window', 'slos', 'owner', 'message', 'start', 'end', 'actions'],
+    wide: ['monitor', 'monitorState', 'maintenanceState', 'source', 'window', 'slos', 'owner', 'actions'],
     medium: ['monitor', 'monitorState', 'status', 'end', 'actions'],
     narrow: ['monitor', 'status', 'actions'],
 };
@@ -169,6 +178,10 @@ function App() {
         [snapshot, dataUpdatedAt, users, verified, resolvingIds],
     );
 
+    // SLOs related to these monitors and their corrections (loaded in parallel, cached).
+    const sloData = useSloData(rows, dataUpdatedAt);
+    const { relatedByMonitor, correctionsBySlo } = sloData;
+
     // ---- Filters (mirrored into the URL for shareable links) ----
     const maintenanceFilter: MaintenanceFilter = isOneOf(filters.state, MAINTENANCE_OPTIONS) ? filters.state : 'all';
     const windowFilter: WindowFilter = isOneOf(filters.window, WINDOW_OPTIONS) ? filters.window : 'all';
@@ -186,9 +199,13 @@ function App() {
         return [...names].sort((a, b) => a.localeCompare(b)).map((name) => ({ label: name, value: name }));
     }, [rows]);
 
+    const parsedQuery = useMemo(() => parseQuery(filters.q), [filters.q]);
+    const onQueryChange = useCallback((q: string) => setFilters({ q }), [setFilters]);
+
     const filteredRows = useMemo(
         () =>
             rows.filter((row) => {
+                if (!rowMatchesQuery(row, parsedQuery)) return false;
                 if (
                     filters.owners.length > 0 &&
                     !filters.owners.includes(row.owner) &&
@@ -198,6 +215,7 @@ function App() {
                 }
                 if (maintenanceFilter !== 'all' && row.maintenanceState !== maintenanceFilter) return false;
                 if (windowFilter !== 'all' && row.windowState !== windowFilter) return false;
+                if (filters.withSlos && !relatedByMonitor.has(row.monitor.id)) return false;
                 if (
                     isDateFilterEnabled &&
                     !row.matches.some((m) => m.startMs !== null && m.startMs >= rangeStart && m.startMs <= rangeEnd)
@@ -206,7 +224,18 @@ function App() {
                 }
                 return true;
             }),
-        [rows, filters.owners, maintenanceFilter, windowFilter, isDateFilterEnabled, rangeStart, rangeEnd],
+        [
+            rows,
+            parsedQuery,
+            filters.owners,
+            filters.withSlos,
+            relatedByMonitor,
+            maintenanceFilter,
+            windowFilter,
+            isDateFilterEnabled,
+            rangeStart,
+            rangeEnd,
+        ],
     );
 
     // Cards count monitors that are actually muted, matching Datadog's own "muted" count;
@@ -214,6 +243,7 @@ function App() {
     const summary = useMemo(() => {
         const downtimeIds = new Set<string>();
         const owners = new Set<string>();
+        const sloIds = new Set<string>();
         let monitors = 0;
         filteredRows.forEach((row) => {
             if (row.maintenanceState === 'Not muting') return;
@@ -222,9 +252,17 @@ function App() {
                 if (!m.downtime.isPlaceholder) downtimeIds.add(m.downtime.id);
             });
             owners.add(row.owner);
+            relatedByMonitor.get(row.monitor.id)?.forEach(({ slo }) => sloIds.add(slo.id));
         });
-        return { monitors, downtimes: downtimeIds.size, owners: owners.size };
-    }, [filteredRows]);
+        return { monitors, downtimes: downtimeIds.size, owners: owners.size, slos: sloIds.size };
+    }, [filteredRows, relatedByMonitor]);
+
+    // Current SLO corrections on SLOs related to the filtered monitors.
+    const correctionRows = useMemo(
+        () => correctionRowsFor(filteredRows, relatedByMonitor, correctionsBySlo),
+        [filteredRows, relatedByMonitor, correctionsBySlo],
+    );
+    const activeCorrections = correctionRows.filter((row) => row.view.state === 'Active').length;
 
     // Prefetch the lazily loaded panel, dialogs and date picker once data is on screen,
     // so the first click doesn't wait on a download.
@@ -303,6 +341,60 @@ function App() {
         },
         [resetExtend],
     );
+
+    // ---- SLO corrections: extend / cancel ----
+    const [correctionExtendTarget, setCorrectionExtendTarget] = useState<CorrectionTarget | null>(null);
+    const [correctionCancelTarget, setCorrectionCancelTarget] = useState<CorrectionTarget | null>(null);
+    const refreshSlos = () => queryClient.invalidateQueries({ queryKey: SLO_QUERY_KEY });
+
+    const extendCorrectionMutation = useMutation({
+        mutationFn: ({ correctionId, newEndIso }: { correctionId: string; newEndIso: string }) =>
+            extendSloCorrection(correctionId, newEndIso),
+        onSuccess: async ({ end }) => {
+            setToast({ level: 'success', title: 'SLO correction extended', message: `It now ends ${formatEnd(Date.parse(end))}.` });
+            setCorrectionExtendTarget(null);
+            await refreshSlos();
+        },
+        onError: (error) =>
+            setToast({ level: 'danger', title: 'Extend failed', message: friendlyError(error, 'edit SLO corrections', SLO_CORRECTIONS_PERMISSION) }),
+    });
+    const cancelCorrectionMutation = useMutation({
+        mutationFn: (correctionId: string) => cancelSloCorrection(correctionId),
+        onSuccess: async ({ action }) => {
+            setToast({
+                level: 'success',
+                title: action === 'deleted' ? 'SLO correction deleted' : 'SLO correction ended',
+                message:
+                    action === 'deleted'
+                        ? 'The scheduled correction was deleted before it started.'
+                        : 'The correction now ends at this moment; time already excluded stays excluded.',
+            });
+            setCorrectionCancelTarget(null);
+            await refreshSlos();
+        },
+        onError: (error) =>
+            setToast({ level: 'danger', title: 'Cancel failed', message: friendlyError(error, 'edit SLO corrections', SLO_CORRECTIONS_PERMISSION) }),
+    });
+    const resetExtendCorrection = extendCorrectionMutation.reset;
+    const resetCancelCorrection = cancelCorrectionMutation.reset;
+    const openExtendCorrection = useCallback(
+        (target: CorrectionTarget) => {
+            resetExtendCorrection();
+            setCorrectionExtendTarget(target);
+        },
+        [resetExtendCorrection],
+    );
+    const openCancelCorrection = useCallback(
+        (target: CorrectionTarget) => {
+            resetCancelCorrection();
+            setCorrectionCancelTarget(target);
+        },
+        [resetCancelCorrection],
+    );
+    const correctionTargetOf = (row: CorrectionRow): CorrectionTarget => ({
+        view: row.view,
+        sloName: row.slos[0]?.name ?? 'SLO',
+    });
 
     // ---- Table ----
     const allColumns = useMemo<Record<string, TableColumn<CoverageRow>>>(
@@ -412,6 +504,40 @@ function App() {
                         </Text>
                     </div>
                 ),
+            },
+            slos: {
+                id: 'slos',
+                Header: 'Related SLOs',
+                accessor: (row: CoverageRow) => relatedByMonitor.get(row.monitor.id)?.length ?? 0,
+                width: 150,
+                Cell: ({ row }: Cell) => {
+                    const related = relatedByMonitor.get(row.original.monitor.id) ?? [];
+                    if (related.length === 0) {
+                        return (
+                            <Text size="sm" variant="tertiary">
+                                {sloData.isLoading ? 'Loading…' : '—'}
+                            </Text>
+                        );
+                    }
+                    const corrections = related.flatMap(({ slo }) => correctionsBySlo.get(slo.id) ?? []);
+                    const active = corrections.filter((view) => view.state === 'Active').length;
+                    return (
+                        <div className="cell-stack">
+                            <Button
+                                isNaked
+                                isTitleCased={false}
+                                label={`${related.length} ${related.length === 1 ? 'SLO' : 'SLOs'}`}
+                                ariaLabel={`Show related SLOs for ${row.original.monitor.name}`}
+                                onClick={() => openDetail(row.original)}
+                            />
+                            <Text size="xs" variant="tertiary" hasEllipsis>
+                                {corrections.length === 0
+                                    ? 'No current corrections'
+                                    : `${corrections.length} correction${corrections.length === 1 ? '' : 's'}${active ? ` · ${active} active` : ''}`}
+                            </Text>
+                        </div>
+                    );
+                },
             },
             owner: {
                 id: 'owner',
@@ -528,7 +654,7 @@ function App() {
                 },
             },
         }),
-        [density, dataUpdatedAt, openDetail, openCancel, openExtend],
+        [density, dataUpdatedAt, openDetail, openCancel, openExtend, relatedByMonitor, correctionsBySlo, sloData.isLoading],
     );
     // Column widths are relative weights (DRUIDS lays columns out as `fr`), so each density
     // shows only the columns that fit and the table always fills the container width.
@@ -536,19 +662,26 @@ function App() {
 
     // ---- Export ----
     const exportStamp = () => new Date().toISOString().replace(/[:.]/g, '-');
+    const relatedSloNames = () =>
+        new Map([...relatedByMonitor].map(([monitorId, related]) => [monitorId, related.map(({ slo }) => slo.name)]));
     const exportCsv = () =>
-        downloadFile(`maintenance-coverage-${exportStamp()}.csv`, toCsv(toExportRecords(filteredRows)), 'text/csv;charset=utf-8');
+        downloadFile(`maintenance-coverage-${exportStamp()}.csv`, toCsv(toExportRecords(filteredRows, relatedSloNames())), 'text/csv;charset=utf-8');
     const exportJson = () =>
         downloadFile(
             `maintenance-coverage-${exportStamp()}.json`,
-            JSON.stringify(toExportRecords(filteredRows), null, 2),
+            JSON.stringify(toExportRecords(filteredRows, relatedSloNames()), null, 2),
             'application/json',
         );
 
     const isNarrow = density === 'narrow';
     const isCompact = density === 'narrow' || density === 'medium';
     const hasFilters =
-        filters.owners.length > 0 || maintenanceFilter !== 'all' || windowFilter !== 'all' || isDateFilterEnabled;
+        filters.q.trim() !== '' ||
+        filters.owners.length > 0 ||
+        maintenanceFilter !== 'all' ||
+        windowFilter !== 'all' ||
+        isDateFilterEnabled ||
+        filters.withSlos;
 
     return (
         <div ref={rootRef} className={`app app--${density}`}>
@@ -569,7 +702,8 @@ function App() {
                     {!isNarrow && (
                         <Text as="p" size="sm" variant="secondary">
                             Monitors muted right now by active downtimes — directly by monitor ID or by tags and scope,
-                            for the whole monitor or only some groups. Inspect, extend, or cancel them safely.
+                            for the whole monitor or only some groups — and the SLOs they affect. Inspect, extend, or
+                            cancel downtimes and SLO corrections safely.
                         </Text>
                     )}
                 </div>
@@ -638,9 +772,18 @@ function App() {
                     value={summary.owners}
                     isLoading={snapshotQuery.isLoading}
                 />
+                <CalloutValue
+                    className="surface"
+                    size={isNarrow ? 'sm' : 'md'}
+                    label={isNarrow ? 'SLOs' : 'Related SLOs'}
+                    value={summary.slos}
+                    additionalText={activeCorrections > 0 ? `${activeCorrections} active correction${activeCorrections === 1 ? '' : 's'}` : undefined}
+                    isLoading={snapshotQuery.isLoading || sloData.isLoading}
+                />
             </Grid>
 
             <section className="surface toolbar" aria-label="Filters">
+                <SearchBar value={filters.q} rows={rows} onChange={onQueryChange} />
                 <div className="toolbar-group">
                     {isNarrow ? (
                         <Select
@@ -681,6 +824,11 @@ function App() {
                         }
                     />
                     <Checkbox
+                        label="With related SLOs"
+                        isChecked={filters.withSlos}
+                        onChange={(event) => setFilters({ withSlos: event.target.checked })}
+                    />
+                    <Checkbox
                         label="Start date"
                         isChecked={isDateFilterEnabled}
                         onChange={(event) =>
@@ -705,7 +853,17 @@ function App() {
                             size="sm"
                             isNaked
                             label="Clear filters"
-                            onClick={() => setFilters({ state: 'all', window: 'all', owners: [], from: null, to: null })}
+                            onClick={() =>
+                                setFilters({
+                                    q: '',
+                                    state: 'all',
+                                    window: 'all',
+                                    owners: [],
+                                    from: null,
+                                    to: null,
+                                    withSlos: false,
+                                })
+                            }
                         />
                     )}
                 </div>
@@ -714,13 +872,37 @@ function App() {
             <section className="surface table-section" aria-label="Maintenance Monitor Coverage">
                 <div className="table-heading">
                     <Text as="h2" size="md" weight="bold">
-                        Maintenance Monitor Coverage
+                        {filters.view === 'corrections' ? 'SLO Corrections' : 'Maintenance Monitor Coverage'}
                     </Text>
-                    <Text size="sm" variant="secondary">
-                        {filteredRows.length} of {rows.length} monitors
-                    </Text>
+                    <div className="table-heading-meta">
+                        <SoftToggle
+                            ariaLabel="View"
+                            options={[
+                                { label: isNarrow ? 'Monitors' : `Monitors (${filteredRows.length})`, value: 'monitors' },
+                                { label: isNarrow ? 'SLO corrections' : `SLO corrections (${correctionRows.length})`, value: 'corrections' },
+                            ]}
+                            value={filters.view}
+                            onChange={(value) => setFilters({ view: value as 'monitors' | 'corrections' })}
+                        />
+                        {!isNarrow && filters.view === 'monitors' && (
+                            <Text size="sm" variant="secondary">
+                                {filteredRows.length} of {rows.length} monitors
+                            </Text>
+                        )}
+                    </div>
                 </div>
                 <div className="table-scroll">
+                    {filters.view === 'corrections' ? (
+                        <SloCorrectionsView
+                            rows={correctionRows}
+                            nowMs={dataUpdatedAt}
+                            density={density}
+                            isLoading={sloData.isLoading}
+                            errorMessage={sloData.error ? friendlyError(sloData.error, 'read SLOs', '"SLOs Read" (slos_read)') : null}
+                            onExtend={(row) => openExtendCorrection(correctionTargetOf(row))}
+                            onCancel={(row) => openCancelCorrection(correctionTargetOf(row))}
+                        />
+                    ) : (
                     <Table<CoverageRow>
                         key={density}
                         aria-label="Maintenance Monitor Coverage"
@@ -738,7 +920,12 @@ function App() {
                             hasPageSizeSelector: !isNarrow,
                         }}
                         emptyState={{
-                            title: rows.length === 0 ? 'No monitors are in maintenance' : 'No monitors match these filters',
+                            title:
+                                rows.length === 0
+                                    ? 'No monitors are in maintenance'
+                                    : filters.q.trim()
+                                      ? `No monitors match "${filters.q.trim()}"`
+                                      : 'No monitors match these filters',
                             subtitle:
                                 rows.length === 0
                                     ? 'No validated active downtime currently covers a monitor in this org.'
@@ -750,6 +937,7 @@ function App() {
                             subtitle: snapshotQuery.isError ? friendlyError(snapshotQuery.error, 'read monitors') : undefined,
                         }}
                     />
+                    )}
                 </div>
             </section>
 
@@ -764,6 +952,10 @@ function App() {
                         onCancel={openCancel}
                         onExtend={openExtend}
                         onDatadogMatchesLoaded={onDatadogMatchesLoaded}
+                        relatedSlos={sloData.isLoading ? undefined : (relatedByMonitor.get(detailRow.monitor.id) ?? [])}
+                        correctionsBySlo={correctionsBySlo}
+                        onExtendCorrection={openExtendCorrection}
+                        onCancelCorrection={openCancelCorrection}
                     />
                 )}
                 {cancelTarget && (
@@ -784,6 +976,34 @@ function App() {
                         error={extendMutation.error ? friendlyError(extendMutation.error, 'extend downtimes') : null}
                         onClose={() => setExtendTarget(null)}
                         onConfirm={(downtimeId, newEndIso) => extendMutation.mutate({ downtimeId, newEndIso })}
+                    />
+                )}
+                {correctionExtendTarget && (
+                    <ExtendCorrectionModal
+                        key={`extend-correction-${correctionExtendTarget.view.correction.id}`}
+                        target={correctionExtendTarget}
+                        nowMs={dataUpdatedAt}
+                        isPending={extendCorrectionMutation.isPending}
+                        error={
+                            extendCorrectionMutation.error
+                                ? friendlyError(extendCorrectionMutation.error, 'edit SLO corrections', SLO_CORRECTIONS_PERMISSION)
+                                : null
+                        }
+                        onClose={() => setCorrectionExtendTarget(null)}
+                        onConfirm={(correctionId, newEndIso) => extendCorrectionMutation.mutate({ correctionId, newEndIso })}
+                    />
+                )}
+                {correctionCancelTarget && (
+                    <CancelCorrectionModal
+                        target={correctionCancelTarget}
+                        isPending={cancelCorrectionMutation.isPending}
+                        error={
+                            cancelCorrectionMutation.error
+                                ? friendlyError(cancelCorrectionMutation.error, 'edit SLO corrections', SLO_CORRECTIONS_PERMISSION)
+                                : null
+                        }
+                        onClose={() => setCorrectionCancelTarget(null)}
+                        onConfirm={(correctionId) => cancelCorrectionMutation.mutate(correctionId)}
                     />
                 )}
             </Suspense>

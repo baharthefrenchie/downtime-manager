@@ -36,6 +36,11 @@ export interface UrlFilters {
     from: number | null;
     to: number | null;
     monitor: number | null;
+    /** Only monitors with related SLOs. */
+    withSlos: boolean;
+    view: 'monitors' | 'corrections';
+    /** Datadog-style search query (free text and key:value terms). */
+    q: string;
 }
 
 function readUrlFilters(): UrlFilters {
@@ -51,11 +56,15 @@ function readUrlFilters(): UrlFilters {
         from: num('from'),
         to: num('to'),
         monitor: num('monitor'),
+        withSlos: params.get('slos') === '1',
+        view: params.get('view') === 'corrections' ? 'corrections' : 'monitors',
+        q: params.get('q') ?? '',
     };
 }
 
 function writeUrlFilters(filters: UrlFilters): void {
     const params = new URLSearchParams();
+    if (filters.q.trim()) params.set('q', filters.q.trim());
     if (filters.state !== 'all') params.set('state', filters.state);
     if (filters.window !== 'all') params.set('window', filters.window);
     filters.owners.forEach((owner) => params.append('owner', owner));
@@ -64,6 +73,8 @@ function writeUrlFilters(filters: UrlFilters): void {
         params.set('to', String(Math.round(filters.to)));
     }
     if (filters.monitor !== null) params.set('monitor', String(filters.monitor));
+    if (filters.withSlos) params.set('slos', '1');
+    if (filters.view === 'corrections') params.set('view', 'corrections');
     const query = params.toString();
     const url = `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`;
     try {

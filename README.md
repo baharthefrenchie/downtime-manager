@@ -22,8 +22,22 @@ active downtimes, using live data from the Datadog org it runs in.
   with relative times. Open-ended downtimes show *Indefinitely*.
 - **Actions:** inspect (side panel with raw get-downtime JSON), **extend** and **cancel**. Both
   re-read the downtime live and refuse if it is no longer active.
+- **Search:** a Datadog-style search bar. Free text matches monitor names (or an ID), and `key:value`
+  matches monitor tags, with `*` wildcards, `-` or `NOT` to exclude, and `OR` between terms (AND is
+  the default). Reserved keys: `id`, `name`, `type`, `status`, `owner`, `creator`, `scope`,
+  `downtime`, `message`; use `tag:key:value` for a tag that shares a reserved name. Keys and values
+  are suggested as you type.
 - **Filters:** maintenance state, window, owner/creator, and downtime start date. Filters live in the
   URL, so filtered views are shareable. Export the filtered rows to CSV or JSON.
+- **Related SLOs:** for each monitor in maintenance, the SLOs it affects. These are monitor-based
+  SLOs that use the monitor and, when coverage is tag/scope-based, SLOs carrying every tag and scope
+  term of the downtime. Each shows its SLI, error budget and current corrections.
+- **SLO corrections:** a view listing the active, scheduled and recurring corrections on those SLOs
+  (including corrections that target SLOs by tag query), with how long they run and how long is
+  left. One-time corrections can be **extended** (start kept, end moved) or **canceled**. Canceling
+  an active correction ends it now, which keeps the time already excluded; deleting it would count
+  that time against the SLO retroactively. A correction that hasn't started yet is deleted.
+  Recurring corrections are edited in Datadog.
 - **Dashboard-friendly:** the layout adapts from full screen down to a small dashboard widget.
 
 ## Permissions
@@ -36,6 +50,8 @@ needs:
 - **Monitors Read**: list monitors and downtimes.
 - **Monitors Downtime** (`monitors_downtime`): cancel and extend downtimes.
 - **User Access Read**: show downtime creators' names.
+- **SLOs Read**: list SLOs and their corrections.
+- **SLOs Corrections** (`slos_corrections`): extend and cancel SLO corrections.
 
 A service account with exactly these permissions is the safest owner for the deploy key. Who can
 open the app is controlled separately, in the app's permissions in App Builder.
